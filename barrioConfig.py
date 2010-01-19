@@ -17,3 +17,4 @@ CALLBACK_URL = 'http://chilitechno.com/fster'
 RESOURCE_URL = 'http://chilitechno.com/fster'
 GET_LOCATION_SCRIPT = '/opt/barrioSquare/get-location.py'
 APP_DIRECTORY = '/opt/barrioSquare/'
+

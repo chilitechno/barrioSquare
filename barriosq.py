@@ -2,7 +2,7 @@
 #
 # barriosq.py - main barrioSquare program file
 # 
-# barrioSquare v0.1.0
+# barrioSquare v0.1.1
 # Copyright(c) 2010 Chili Technologies LLC
 # http://www.chilitechno.com/fster
 #
@@ -28,7 +28,7 @@
 # ============================================================================
 # Name        : barriosq.py
 # Author      : Chris J. Burris - chris@chilitechno.com
-# Version     : 0.1.0
+# Version     : 0.1.1
 # Description : barrioSquare
 # ============================================================================
 
