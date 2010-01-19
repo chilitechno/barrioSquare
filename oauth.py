@@ -34,7 +34,7 @@ from xml.dom.minidom import parseString
 VERSION = '1.0' # Hi Blaine!
 HTTP_METHOD = 'GET'
 SIGNATURE_METHOD = 'PLAINTEXT'
-USER_AGENT = 'BarrioSquare/0.1.0 (Maemo5; Linux arm7vl) (http://chilitechno.com/fster/)'
+USER_AGENT = 'BarrioSquare/0.1.1 (Maemo5; Linux arm7vl) (http://chilitechno.com/fster/)'
 
 class OAuthError(RuntimeError):
     """Generic exception class."""

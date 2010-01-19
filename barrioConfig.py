@@ -1,5 +1,5 @@
 GOOGLE_MAPS_API_KEY = 'ABQIAAAApZ2euq0Rw9q9gnvrFpM9exTnaMynjZlWua31ZRN9Bu7KwLftLRQ43gnDTGdinhoU7RuKLZRQxMKcVg'
-VERSION_STRING = 'barrioSquare 0.1.0'
+VERSION_STRING = 'barrioSquare 0.1.1'
 
 # key and secret granted by the service provider for this consumer application - same as the MockOAuthDataStore
 CONSUMER_KEY = '73da08e67b46cb1dc10fd43ea813071104af9fe79'
