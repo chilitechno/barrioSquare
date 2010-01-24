@@ -1,0 +1,17 @@
+CHANGE LOG
+
+v0.1.10:
+	Major flow control updates, and UI tweaks to improve loading times.
+	Added QThreads for signIn dialog to enable background signin thread and osso display.
+	Added some more error handling of invalid xml response from api.foursquare.com 
+	(if api is overloaded or down). Misc python errors relating to nearby venue without address data
+
+v0.1.5: Additional changes to get-location.py location acquisition routines.
+	Iconified some buttons on the MainWindow, and converted place detail 
+	and friend detail pages to hildon stackable window (via QMainWindow conversion).
+	Hide the tabs from the QTabWidget and add buttons for switching between tab views
+
+v0.1.1: Modified deb package to include python2.5-qt4-network as required dependency.
+
+v0.1.0: Initial release for testing.
+
