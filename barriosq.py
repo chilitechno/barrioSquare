@@ -2,20 +2,24 @@
 #
 # barriosq.py - main barrioSquare program file
 # 
-# barrioSquare v0.1.1
+# barrioSquare v0.1.5
 # Copyright(c) 2010 Chili Technologies LLC
 # http://www.chilitechno.com/fster
 #
-# This file may be licensed under the terms of of the
-# GNU General Public License Version 2 (the ``GPL'').
+# This file is part of barrioSquare.
 #
-# Software distributed under the License is distributed
-# on an ``AS IS'' basis, WITHOUT WARRANTY OF ANY KIND, either
-# express or implied. See the GPL for the specific language
-# governing rights and limitations.
-#
-# You should have received a copy of the GPL along with this
-# program. If not, go to http://www.gnu.org/licenses/gpl.html
+# barrioSquare is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# barrioSquare is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with barrioSquare. If not, see <http://www.gnu.org/licenses/>.
 # or write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 #
@@ -28,7 +32,7 @@
 # ============================================================================
 # Name        : barriosq.py
 # Author      : Chris J. Burris - chris@chilitechno.com
-# Version     : 0.1.1
+# Version     : 0.1.5
 # Description : barrioSquare
 # ============================================================================
 
@@ -44,11 +48,13 @@ import time
 import os
 import cgi
 import xml
+import osso
+import socket
 
 from xml.dom.minidom import parseString
 # location libs
-import location
-import gobject
+# import location
+# import gobject
 
 # thread and process libs
 import thread
@@ -59,9 +65,16 @@ import webbrowser
 import urllib2
 
 # global script vars
+locationSubprocessRestartCount = 0
+locationSubprocessIsRestarting = False
+friendRefreshCount = 0
+getLocationChildPID = 0
+acquisitionCount = 0
 badgeCount = 0
 currentLatitude = 0
 currentLongitude = 0
+horizontalAccuracy = 1000
+verticalAccuracy = 1000
 locationMethodType = 0
 fsRequestToken = None
 fsRequestTokenString = ''
@@ -73,13 +86,14 @@ locationFixAcquired = 0
 qb = None
 searchKeywords = ''
 shoutString = ''
+infoNoticeString = ''
 checkinVenueID = 0
 pingFriends = False
 pingTwitter = False
 allowIncomingPings = True
 pingFacebook = False
 # set FakeCheckin to True to simulate a check-in (must have really checked into a venue at least once before)
-FakeCheckin = False
+FakeCheckin = True
 loggedInUserID = 0
 showSplashScreen = False
 doingSignout = False
@@ -105,13 +119,16 @@ else:
 	locationMethodFile = open(userPreferencesDir + 'locationMethodType.txt','r')
 	i = 0
 	for line in locationMethodFile:
-		print 'line: ' + line
+		# print 'line: ' + line
 		i = i + 1
 		if (i == 1):
 			locationMethodType = int(line)
 	locationMethodFile.close()
 	print 'loaded locationMethodType: %d' % locationMethodType
 
+# redirect error and std out to files for crash reporting
+fsock = open(os.path.expanduser('~') + os.sep + '.barriosquare' + os.sep + 'stderr.log', 'w')
+sys.stderr = fsock
 
 class SplashScreenDialog(QtGui.QDialog):
 	def __init__(self, parent=None):
@@ -156,7 +173,7 @@ class ProcessingDialog(QtGui.QDialog):
 
 			# add descriptive text
 			self.lblText = QtGui.QLabel(txt, self)
-			self.lblText.setGeometry(65,5,600,190)
+			self.lblText.setGeometry(65,5,600,100)
 			self.lblText.setWordWrap(True)
 			self.lblText.setAlignment(QtCore.Qt.AlignTop)
 		else:
@@ -169,7 +186,12 @@ class ProcessingDialog(QtGui.QDialog):
 			self.bttnOk.setGeometry(620,5,175,80)
 			self.bttnOk.setStyleSheet(QPUSHBUTTON_DEFAULT)
 
-		
+		self.lblPoweredby = QtGui.QLabel('',self)
+		self.lblPoweredby.setGeometry(5,164,225,36)
+		poweredbyPixmap = QtGui.QPixmap(APP_DIRECTORY + 'powerbyfoursquare2.png')
+		poweredbyPixmap2 = poweredbyPixmap.scaled(QtCore.QSize(225,36), QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)		
+		self.lblPoweredby.setPixmap(poweredbyPixmap2)
+
 		
 class NearbyWorkerThread(QtCore.QThread):
 	def __init__(self, parent = None):
@@ -195,7 +217,7 @@ class NearbyWorkerThread(QtCore.QThread):
 		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
 		print oauth_request.to_postdata()
 		nearbyResultXml = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'venues', requestType='GET')
-		print nearbyResultXml		
+		# print nearbyResultXml		
 		# save venue data to cache file
 		nearbyCacheFile = open(userPreferencesDir + 'nearbyCache.xml','w')
 		nearbyCacheFile.write(nearbyResultXml)
@@ -211,6 +233,7 @@ class RefreshFriendsWorkerThread(QtCore.QThread):
 		self.exiting = False
 
 	def run(self):
+		global infoNoticeString
 		print 'RefreshFriendsWorkerThread.run() Executing thread logic'
 		client3 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, API_PREFIX_URL+'checkins', ACCESS_TOKEN_URL, AUTHORIZATION_URL)
 		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
@@ -228,20 +251,28 @@ class RefreshFriendsWorkerThread(QtCore.QThread):
 		}
 		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'checkins', parameters=nearbyParams)
 		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
-		print oauth_request.to_postdata()
+		# print oauth_request.to_postdata()
 		checkinsResultXml = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'checkins', requestType='GET')
-		print checkinsResultXml		
-		# save venue data to cache file
-		checkinsCacheFile = open(userPreferencesDir + 'checkinsResultsCache.xml','w')
-		checkinsCacheFile.write(checkinsResultXml)
-		checkinsCacheFile.close()	
+		# print checkinsResultXml		
 		parseSuccess = False
 		try:
 			checkinsXml = parseString(checkinsResultXml)
 			parseSuccess = True
+			# save venue data to cache file
+			checkinsCacheFile = open(userPreferencesDir + 'checkinsResultsCache.xml','w')
+			checkinsCacheFile.write(checkinsResultXml)
+			checkinsCacheFile.close()	
 		except xml.parsers.expat.ExpatError:
 			print 'error parsing checkinsResultXml'
 			parseSuccess = False
+			infoNoticeString = 'Error: api.foursquare.com problem refreshing friends'
+			self.emit(QtCore.SIGNAL('displayInfoNotice()'))
+			# if file doesn't exist save an empty xml doc to prevent endless retry
+			if (not os.path.exists(userPreferencesDir + 'checkinsResultsCache.xml')):
+				checkinsCacheFile = open(userPreferencesDir + 'checkinsResultsCache.xml','w')
+				checkinsCacheFile.write('<?xml version="1.0" encoding="UTF-8"?><checkins/>')
+				checkinsCacheFile.close()	
+				
 	
 		if parseSuccess == True:
 			checkinNodes = checkinsXml.getElementsByTagName('checkin')
@@ -251,7 +282,7 @@ class RefreshFriendsWorkerThread(QtCore.QThread):
 
 				photoURLchunks = photoURL.split('/')
 				photoFile = userPreferencesDir + 'imageCache' + os.sep + 'users' + os.sep + photoURLchunks[3] + '_' + photoURLchunks[4]
-				print 'photoFile: ' + photoFile			
+				# print 'photoFile: ' + photoFile			
 				# if cached file doesn't exist for user, download it now
 				if not os.path.exists(photoFile):
 					global qb
@@ -267,8 +298,8 @@ class CheckinWorkerThread(QtCore.QThread):
 		self.exiting = False
 
 	def setup(self, pFriends, pTwitter, pFacebook, vID, shoutStr):
-		print '(setup) shout: '+shoutStr
-		print '(setup) venueID %d' % vID
+		# print '(setup) shout: '+shoutStr
+		# print '(setup) venueID %d' % vID
 		self.shout = shoutStr
 		self.pingFriends = pFriends
 		self.pingTwitter = pTwitter
@@ -278,6 +309,7 @@ class CheckinWorkerThread(QtCore.QThread):
 	def run(self):
 		print 'Executing thread logic'
 		global FakeCheckin
+		global infoNoticeString
 
 		print '*** check in data ***'
 		print currentLatitude
@@ -322,16 +354,30 @@ class CheckinWorkerThread(QtCore.QThread):
 			}
 			oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'checkin', parameters=nearbyParams)
 			oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
-			print oauth_request.to_postdata()
+			# print oauth_request.to_postdata()
 			checkinResultXmlString = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'checkin', requestType='POST')
 			print checkinResultXmlString		
-			checkinCacheFile = open(userPreferencesDir + 'checkInCache.xml','w')
-			checkinCacheFile.write(checkinResultXmlString)
-			checkinCacheFile.close()	
-			# also store a copy tagged with the venueID 
-			checkinCacheFile2 = open(userPreferencesDir + 'checkInCache_vid' + str(self.venueID) + '.xml','w')
-			checkinCacheFile2.write(checkinResultXmlString)
-			checkinCacheFile2.close()	
+			parseSuccess = False
+			try:
+				checkinResultXml = parseString(checkinResultXmlString)
+				parseSuccess = True
+				checkinCacheFile = open(userPreferencesDir + 'checkInCache.xml','w')
+				checkinCacheFile.write(checkinResultXmlString)
+				checkinCacheFile.close()
+
+				# also store a copy tagged with the venueID 
+				checkinCacheFile2 = open(userPreferencesDir + 'checkInCache_vid' + str(self.venueID) + '.xml','w')
+				checkinCacheFile2.write(checkinResultXmlString)
+				checkinCacheFile2.close()		
+
+			except xml.parsers.expat.ExpatError:
+				print 'error parsing checkinResult'
+				parseSuccess = False
+				infoNoticeString = 'Error: api.foursquare.com problem. Check history before trying again'
+				self.emit(QtCore.SIGNAL('displayInfoNotice()'))	
+		else:
+			# sleep fake checkin for 5 seconds to simulate real checkin
+			time.sleep(5)		
 
 
 	def __del__(self):
@@ -352,7 +398,7 @@ class VenueListItem(QtGui.QWidget):
 
 		paint.setPen(QtGui.QColor(255, 255, 255))
 		paint.setBrush(QtGui.QColor(255, 255, 255))
-		paint.drawRect(0, 0, 760, 75)
+		paint.drawRect(0, 0, 800, 75)
 
 		paint.setPen(QtGui.QColor(168, 34, 3))
 		font = QtGui.QFont('Helvetica', 25, QtGui.QFont.Light)
@@ -367,7 +413,7 @@ class VenueListItem(QtGui.QWidget):
 		pen = QtGui.QPen(QtGui.QColor(20, 20, 20), 1, QtCore.Qt.DotLine)
 		paint.setPen(pen)
 		paint.setBrush(QtCore.Qt.NoBrush)
-	        paint.drawLine(1, 74, 760, 74)
+	        paint.drawLine(1, 74, 800, 74)
 
 		paint.end()
 
@@ -389,7 +435,7 @@ class BadgeListItem(QtGui.QWidget):
 
 		paint.setPen(QtGui.QColor(255, 255, 255))
 		paint.setBrush(QtGui.QColor(255, 255, 255))
-		paint.drawRect(0, 0, 760, 75)
+		paint.drawRect(0, 0, 800, 75)
 
 		paint.setPen(QtGui.QColor(168, 34, 3))
 		font = QtGui.QFont('Helvetica', 30, QtGui.QFont.Light)
@@ -404,7 +450,7 @@ class BadgeListItem(QtGui.QWidget):
 		pen = QtGui.QPen(QtGui.QColor(20, 20, 20), 1, QtCore.Qt.DotLine)
 		paint.setPen(pen)
 		paint.setBrush(QtCore.Qt.NoBrush)
-	        paint.drawLine(1, 74, 760, 74)
+	        paint.drawLine(1, 74, 800, 74)
 
 		paint.end()
 
@@ -427,7 +473,7 @@ class FriendListItem(QtGui.QWidget):
 
 		paint.setPen(QtGui.QColor(255, 255, 255))
 		paint.setBrush(QtGui.QColor(255, 255, 255))
-		paint.drawRect(0, 0, 760, 75)
+		paint.drawRect(0, 0, 800, 75)
 
 		paint.setPen(QtGui.QColor(168, 34, 3))
 		font = QtGui.QFont('Helvetica', 23, QtGui.QFont.Light)
@@ -442,7 +488,7 @@ class FriendListItem(QtGui.QWidget):
 		pen = QtGui.QPen(QtGui.QColor(20, 20, 20), 1, QtCore.Qt.DotLine)
 		paint.setPen(pen)
 		paint.setBrush(QtCore.Qt.NoBrush)
-	        paint.drawLine(1, 74, 760, 74)
+	        paint.drawLine(1, 74, 800, 74)
 
 		paint.end()
 
@@ -464,7 +510,7 @@ class TipListItem(QtGui.QWidget):
 
 		paint.setPen(QtGui.QColor(255, 255, 255))
 		paint.setBrush(QtGui.QColor(255, 255, 255))
-		paint.drawRect(0, 0, 790, self.widgetHeight)
+		paint.drawRect(0, 0, 800, self.widgetHeight)
 
 		doc = QtGui.QTextDocument()
 		doc.setHtml(self.mainText)
@@ -473,7 +519,7 @@ class TipListItem(QtGui.QWidget):
 		paint.setPen(QtGui.QColor(168, 34, 3))
 		font = QtGui.QFont('Helvetica', 15, QtGui.QFont.Light)
 		paint.setFont(font)
-		rect = QtCore.QRectF(0,5,790,self.widgetHeight-5)
+		rect = QtCore.QRectF(0,5,800,self.widgetHeight-5)
 		options = QtGui.QTextOption()
 		options.setWrapMode(QtGui.QTextOption.WordWrap)
 		options.setAlignment(QtCore.Qt.AlignLeft)
@@ -486,13 +532,17 @@ class TipListItem(QtGui.QWidget):
 		pen = QtGui.QPen(QtGui.QColor(20, 20, 20), 1, QtCore.Qt.DotLine)
 		paint.setPen(pen)
 		paint.setBrush(QtCore.Qt.NoBrush)
-	        paint.drawLine(1, self.widgetHeight - 1, 760, self.widgetHeight - 1)
+	        paint.drawLine(1, self.widgetHeight - 1, 800, self.widgetHeight - 1)
 
 		paint.end()
 
 class CheckInDialog(QtGui.QDialog):
 	def __init__(self, id, venueName, parent=None):
 		QtGui.QDialog.__init__(self, parent)
+
+		p = self.palette()
+		p.setColor(QtGui.QPalette.Window, QtGui.QColor(0, 0, 0))
+		self.setPalette(p)
 		
 		print 'Place ID:' + id
 		self.venueID = id
@@ -532,6 +582,21 @@ class CheckInDialog(QtGui.QDialog):
 
 		self.checkinWorker = CheckinWorkerThread()
 		self.connect(self.checkinWorker, QtCore.SIGNAL('finished()'), self.checkinFinished)
+		self.connect(self.checkinWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)
+
+		self.lblLoadingIcon = QtGui.QLabel('',self)
+		self.loadingGif = QtGui.QMovie(APP_DIRECTORY + 'loading2.gif', QtCore.QByteArray(), self)
+		self.loadingGif.setCacheMode(QtGui.QMovie.CacheAll)
+		self.loadingGif.setSpeed(100)
+		self.loadingGif.setBackgroundColor(QtGui.QColor(0, 0, 0))
+		self.lblLoadingIcon.setGeometry(330,290,50,50)
+		self.lblLoadingIcon.setMovie(self.loadingGif)
+		self.lblLoadingIcon.hide()
+
+	def displayInfoNoticeGlobal(self):
+		global infoNoticeString
+		global qb
+		qb.displayInfoNotice(infoNoticeString)
 
 	def checkinFinished(self):
 		print 'checkinFinished'
@@ -553,8 +618,11 @@ class CheckInDialog(QtGui.QDialog):
 		global checkinVenueID
 		checkinVenueID = venID
 
+		self.loadingGif.start()
+		self.lblLoadingIcon.show()
 		self.bttnCheckIn.setEnabled(False)
 		self.bttnCheckIn.setText('Checking In...')
+		self.bttnCheckIn.setEnabled(False)
 
 		self.checkinWorker.setup(self.chkPingFriends.isChecked(),self.chkTwitter.isChecked(),self.chkFacebook.isChecked(),venID,shout)
 		self.checkinWorker.start()
@@ -818,7 +886,7 @@ class PlaceInfoLoaderWorkerThread(QtCore.QThread):
 					# download photo if file cache not existent
 					checkinURLchunks = checkinPhotoUrl.split('/')
 					checkinPhotoFile = userPreferencesDir + 'imageCache' + os.sep + 'users' + os.sep + checkinURLchunks[3] + '_' + checkinURLchunks[4]
-					print 'checkinPhotoFile: ' + checkinPhotoFile
+					# print 'checkinPhotoFile: ' + checkinPhotoFile
 					if not os.path.exists(checkinPhotoFile):
 						qb.getUserPhoto(checkinPhotoUrl)
 
@@ -842,7 +910,7 @@ class PlaceInfoLoaderWorkerThread(QtCore.QThread):
 					tipPhotoUrl = node.getElementsByTagName('photo')[0].firstChild.data			
 					tipURLchunks = tipPhotoUrl.split('/')
 					tipPhotoFile = userPreferencesDir + 'imageCache' + os.sep + 'users' + os.sep + tipURLchunks[3] + '_' + tipURLchunks[4]
-					print 'tipPhotoFile: ' + tipPhotoFile
+					# print 'tipPhotoFile: ' + tipPhotoFile
 					if not os.path.exists(tipPhotoFile):
 						qb.getUserPhoto(tipPhotoUrl)
 
@@ -868,7 +936,7 @@ class PlaceInfoLoaderWorkerThread(QtCore.QThread):
 				# set photo
 				photoURLchunks = mayorPhotoUrl.split('/')
 				photoFile = userPreferencesDir + 'imageCache' + os.sep + 'users' + os.sep + photoURLchunks[3] + '_' + photoURLchunks[4]
-				print 'photoFile: ' + photoFile			
+				# print 'photoFile: ' + photoFile			
 				# if cached file doesn't exist for mayor, download it now
 				if not os.path.exists(photoFile):
 					qb.getUserPhoto(mayorPhotoUrl)
@@ -888,7 +956,7 @@ class BadgesDialog(QtGui.QDialog):
 		self.setWindowTitle('My Badges')
 		self.resize(800,480)
 		self.badgesListWidget = QtGui.QListWidget(self)
-		self.badgesListWidget.setGeometry(5, 5, 750, 370)
+		self.badgesListWidget.setGeometry(5, 5, 820, 370)
 
 		# load info
 		if int(uid) == 0:
@@ -911,7 +979,7 @@ class BadgesDialog(QtGui.QDialog):
 				badgeDescr = node.getElementsByTagName('description')[0].firstChild.data
 				badgeName = node.getElementsByTagName('name')[0].firstChild.data
 				badgeItem = QtGui.QListWidgetItem('',self.badgesListWidget)
-				badgeItem.setSizeHint(QtCore.QSize(690, 75))
+				badgeItem.setSizeHint(QtCore.QSize(770, 75))
 				wItem = BadgeListItem()
 				wItem.setText(badgeName,badgeDescr,badgeFile)
 				self.badgesListWidget.setItemWidget(badgeItem,wItem)
@@ -997,13 +1065,13 @@ class WhosHereDialog(QtGui.QDialog):
 		if checkinNodes.length > 0:
 			for node in checkinNodes:
 				checkinItem = QtGui.QListWidgetItem('',self.whosHereListWidget)
-				checkinItem.setSizeHint(QtCore.QSize(690, 75))
+				checkinItem.setSizeHint(QtCore.QSize(770, 75))
 				wItem = FriendListItem()
 				checkinString = node.getElementsByTagName('firstname')[0].firstChild.data
 				checkinString += ' ' + node.getElementsByTagName('lastname')[0].firstChild.data
 				
 				shoutNodes = node.getElementsByTagName('shout')
-				print 'shouts: %d' % shoutNodes.length
+				# print 'shouts: %d' % shoutNodes.length
 				if shoutNodes.length > 0:
 					checkinString += ' ("' + shoutNodes[0].firstChild.data + '")'
 				
@@ -1014,14 +1082,25 @@ class WhosHereDialog(QtGui.QDialog):
 				wItem.setText(checkinString,'5 mins ago','',checkinPhotoFile)
 				self.whosHereListWidget.setItemWidget(checkinItem,wItem)
 				checkinItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
+
+class AddTipDialog(QtGui.QMainWindow):
+	def __init__(self, venueID, venueName, parent=None):
+		QtGui.QMainWindow.__init__(self, parent)	
+		self.setWindowTitle('Add tip for ' + venueName)
+		self.lblName = QtGui.QLabel('Add Tip',self)
+		self.lblName.setGeometry(5,5,100,10)
+		self.txtTip = QtGui.QTextEdit(self)
+		self.txtTip.setAcceptRichText(False)
+		self.txtTip.setGeometry(5,15,800,200)
+
 		
-class TipsDialog(QtGui.QDialog):
+class TipsDialog(QtGui.QMainWindow):
 	def __init__(self, venueID, parent=None):
-		QtGui.QDialog.__init__(self, parent)	
+		QtGui.QMainWindow.__init__(self, parent)	
 		self.setWindowTitle('Tips')
 		self.resize(800,480)
 		self.tipsListWidget = QtGui.QListWidget(self)
-		self.tipsListWidget.setGeometry(5, 5, 790, 370)
+		self.tipsListWidget.setGeometry(5, 5, 790, 350)
 		p = self.tipsListWidget.palette()
 		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
 		p.setColor(QtGui.QPalette.Base, QtGui.QColor(255, 0, 0))
@@ -1059,7 +1138,7 @@ class TipsDialog(QtGui.QDialog):
 				print 'line len: %d' % len(tipString)
 				lines = math.ceil(len(tipString) / 40)
 				print 'lines: %d' % lines
-				height = lines * 40
+				height = lines * 30
 				print 'height: %d' % height
 				if height < 75:
 					height = 75
@@ -1081,9 +1160,9 @@ class TipsDialog(QtGui.QDialog):
 		# parse output
 
 		
-class PlaceInfoDialog(QtGui.QDialog):
+class PlaceInfoDialog(QtGui.QMainWindow):
 	def __init__(self, id, mainWindow, parent=None):
-		QtGui.QDialog.__init__(self, parent)	
+		QtGui.QMainWindow.__init__(self, parent)	
 
 		self.resize(800,480)
 
@@ -1171,7 +1250,7 @@ class PlaceInfoDialog(QtGui.QDialog):
 
 	def doShowTips(self):
 		print 'doShowTips'
-		self.tipsDlg = TipsDialog(self.venueID)
+		self.tipsDlg = TipsDialog(self.venueID,self)
 		self.tipsDlg.show()
 
 	def doShowRecentCheckins(self):
@@ -1185,7 +1264,7 @@ class PlaceInfoDialog(QtGui.QDialog):
 		self.lblAddress.setText(self.addressString)
 		self.lblCity.setText(self.cityString)
 		self.lblPhone.setText(self.phoneString)
-		self.setWindowTitle('Venue Details: ' + self.venueName)
+		self.setWindowTitle(self.venueName)
 		self.web.load(QtCore.QUrl('http://maps.google.com/maps/api/staticmap?center=' + self.strLatLon + '&size=600x175&maptype=roadmap&markers=color:red|' + self.strLatLon + '&zoom=16&sensor=false&key=' + GOOGLE_MAPS_API_KEY))
 		if self.hasSpecials:
 			self.bttnSpecials = QtGui.QPushButton(self.specialsText,self)
@@ -1247,10 +1326,11 @@ class HistoryWorkerThread(QtCore.QThread):
 		}
 		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'history', parameters=nearbyParams)
 		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
-		print oauth_request.to_postdata()
+		# print oauth_request.to_postdata()
 		historyResultXml = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'history', requestType='GET')
-		print historyResultXml		
+		# print historyResultXml		
 		# save venue data to cache file
+		# catch invalid xml
 		historyCacheFile = open(userPreferencesDir + 'historyCache.xml','w')
 		historyCacheFile.write(historyResultXml)
 		historyCacheFile.close()	
@@ -1354,9 +1434,114 @@ class ConfirmDialog(QtGui.QDialog):
 	def __init__(self, titleString, confirmString, parent=None):
 		QtGui.QDialog.__init__(self, parent)
 
+class AboutDialog(QtGui.QDialog):
+	def __init__(self, parent=None):
+		QtGui.QDialog.__init__(self, parent)
+		self.setWindowTitle('About barrioSquare')
+		self.resize(800,480)
+
+class SignInWorkerThread(QtCore.QThread):
+	def __init__(self, parent = None):
+    		QtCore.QThread.__init__(self, parent)
+		self.exiting = False
+
+	def setup(self,email,password):
+		self.email = email
+		self.password = password
+
+	def run(self):
+		print 'SignInWorkerThread.run() Executing thread logic'
+		global qb
+		global infoNoticeString
+		print 'emailOrPhone: 	' + self.email
+		print 'password:	' + self.password
+
+		print '** OAuth **'
+		client = oauthclient.SimpleOAuthClient(SERVER, PORT, REQUEST_TOKEN_URL, ACCESS_TOKEN_URL, AUTHORIZATION_URL)
+		client2 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, AUTHORIZATION_EXCHANGE_URL, ACCESS_TOKEN_URL, AUTHORIZATION_URL)
+		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
+		signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
+		signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
+	
+		fourSquareCredentials = {
+			'fs_username':	self.email,
+			'fs_password':	self.password
+		}	
+
+		print '* Do Authentication Exchange *'
+		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=AUTHORIZATION_EXCHANGE_URL, parameters=fourSquareCredentials)
+		oauth_request.sign_request(signature_method_plaintext, consumer, None)
+		authResult = None
+		clientConnectErrorString = ''
+		clientConnectResult = 0
+		try:
+			authResult = client2.fetch_request_token(oauth_request)
+			clientConnectResult = 0
+		except socket.error, e:
+			print 'socket error connecting to api endpoint'
+			print e
+			clientConnectResult = e[0]
+			clientConnectErrorString = e[1]
+
+		if clientConnectResult > 0:
+			infoNoticeString = 'Error: ' + clientConnectErrorString
+			self.emit(QtCore.SIGNAL('displayInfoNotice()'))	
+
+		elif authResult != None:
+			print authResult
+			global fsRequestToken
+			fsRequestToken = authResult
+			# save token to file
+			global hasToken
+			hasToken = 1
+			tokenFile = open(userPreferencesDir + 'tokenFile','w')
+			tokenFile.write(fsRequestToken.to_string())		
+			tokenFile.close()
+			global fsRequestTokenString
+			fsRequestTokenString = fsRequestToken.to_string()
+			print fsRequestTokenString
+			params = cgi.parse_qs(fsRequestTokenString, keep_blank_values=False)
+			key = params['oauth_token'][0]
+			global fsKey
+			fsKey = key
+			secret = params['oauth_token_secret'][0]
+			global fsSecret
+			fsSecret = secret
+	
+			fsRequestToken = oauth.OAuthToken(key, secret)
+			print fsRequestToken
+			print fsKey
+			print fsSecret
+
+			time.sleep(1)
+			# authorize the token
+			oauth_request = oauth.OAuthRequest.from_token_and_callback(token=fsRequestToken, http_url=client.authorization_url)
+			response = client.authorize_token(oauth_request)
+			print response
+			self.emit(QtCore.SIGNAL('setSignInSuccess'),True)	
+		else:
+			# login incorrect, display error
+			# self.lblError.setText('Username or password incorrect')
+			# use OSSO
+			infoNoticeString = 'Username or password incorrect'
+			self.emit(QtCore.SIGNAL('displayInfoNotice()'))	
+
+		time.sleep(1)
+
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+
+
 class SignInDialog(QtGui.QDialog):
 	def __init__(self, parent=None):
 		QtGui.QDialog.__init__(self, parent)
+		self.SigningIn = False
+		self.SignInSuccess = False
+
+		p = self.palette()
+		p.setColor(QtGui.QPalette.Window, QtGui.QColor(0, 0, 0))
+		self.setPalette(p)
 
 		self.setModal(1)
 		self.setWindowTitle('Sign In')
@@ -1383,9 +1568,25 @@ class SignInDialog(QtGui.QDialog):
 		self.txtPasswd.setGeometry(270, 65, 220, 50)
 		self.txtPasswd.setEchoMode(QtGui.QLineEdit.Password)
 
-		bttnSignIn2 = QtGui.QPushButton('Sign In', self)
-		bttnSignIn2.setGeometry(500, 20, 150, 80)
-		bttnSignIn2.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.lblLoadingIcon = QtGui.QLabel('',self)
+		self.loadingGif = QtGui.QMovie(APP_DIRECTORY + 'loading2.gif', QtCore.QByteArray(), self)
+		self.loadingGif.setCacheMode(QtGui.QMovie.CacheAll)
+		self.loadingGif.setSpeed(100)
+		self.loadingGif.setBackgroundColor(QtGui.QColor(0, 0, 0))
+		self.lblLoadingIcon.setGeometry(525,130,50,50)
+		self.lblLoadingIcon.setMovie(self.loadingGif)
+		self.lblLoadingIcon.hide()
+
+		self.bttnSignIn2 = QtGui.QPushButton('', self)
+		self.bttnSignIn2.setGeometry(180, 135, 300, 40)
+
+		signInPixmap = QtGui.QPixmap(APP_DIRECTORY + 'SignInFourSquare.png')
+		signInPixmap2 = signInPixmap.scaled(QtCore.QSize(300,40), QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)		
+	
+		self.bttnSignIn2.setIcon(QtGui.QIcon(signInPixmap2))
+		self.bttnSignIn2.setIconSize(QtCore.QSize(300,40))
+
+		self.bttnSignIn2.setStyleSheet(QPUSHBUTTON_DEFAULT)
 
 		lblInfo = QtGui.QLabel('Login will be via foursquare.com\'s OAuth mechanism to obtain a token. User credentials are not stored. When you sign out of the app, the token is destroyed. You can also remove app access to your account at anytime by visiting foursquare.com and clicking settings.',self)
 		lblInfo.setGeometry(5,150,790,300)
@@ -1395,10 +1596,44 @@ class SignInDialog(QtGui.QDialog):
 
 		self.resize(800,480)
 
+		self.signInWorker = SignInWorkerThread()
+		self.connect(self.signInWorker, QtCore.SIGNAL('finished()'), self.signInCompleted)
+		self.connect(self.signInWorker, QtCore.SIGNAL('setSignInSuccess'), self.setSignInSuccess)
+		self.connect(self.signInWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)
+
 		# self.connect(bttnCancel, QtCore.SIGNAL('clicked()'), 
 		#	self, QtCore.SLOT('close()'))
-		self.connect(bttnSignIn2, QtCore.SIGNAL('clicked()'),
+		self.connect(self.bttnSignIn2, QtCore.SIGNAL('clicked()'),
 			self.doSignInClicked)
+
+	def displayInfoNoticeGlobal(self):
+		global infoNoticeString
+		global qb
+		qb.displayInfoNotice(infoNoticeString)
+
+	def setSignInSuccess(self,completed):
+		self.SignInSuccess = completed
+
+	def closeEvent(self, event):
+		if self.SigningIn:
+			reply = QtGui.QMessageBox.question(self, 'Cancel?',"Are you sure you want to cancel sign in?", QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
+			if reply == QtGui.QMessageBox.Yes:
+				self.SigningIn = False
+				event.accept()
+			else:
+				event.ignore()
+		else:
+			event.accept()
+
+	def signInCompleted(self):
+		self.bttnSignIn2.setEnabled(True)
+		self.lblLoadingIcon.hide()
+		self.loadingGif.stop()
+		self.SigningIn = False
+		if self.SignInSuccess:
+			# emit signOutFinished
+			self.emit(QtCore.SIGNAL('signOutFinished()'))	
+			self.close()
 	
 	def pause(self):
 		print ''
@@ -1406,60 +1641,16 @@ class SignInDialog(QtGui.QDialog):
 
 	# @QtCore.pyqtSlot()
 	def doSignInClicked(self):
-		print 'emailOrPhone: 	' + self.txtEmail.text()
-		print 'password:	' + self.txtPasswd.text()
+		self.bttnSignIn2.setEnabled(False)
+		self.lblLoadingIcon.show()
+		self.loadingGif.start()
+		self.SigningIn = True		
+		self.signInWorker.setup(str(self.txtEmail.text()),str(self.txtPasswd.text()))
+		self.signInWorker.start()
+		
 
-		print '** OAuth **'
-		client = oauthclient.SimpleOAuthClient(SERVER, PORT, REQUEST_TOKEN_URL, ACCESS_TOKEN_URL, AUTHORIZATION_URL)
-		client2 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, AUTHORIZATION_EXCHANGE_URL, ACCESS_TOKEN_URL, AUTHORIZATION_URL)
-		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
-		signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
-		signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
-	
-		fourSquareCredentials = {
-			'fs_username':	str(self.txtEmail.text()),
-			'fs_password':	str(self.txtPasswd.text())
-		}	
 
-		print '* Do Authentication Exchange *'
-		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=AUTHORIZATION_EXCHANGE_URL, parameters=fourSquareCredentials)
-		oauth_request.sign_request(signature_method_plaintext, consumer, None)
-		authResult = client2.fetch_request_token(oauth_request)
-		if authResult != None:
-			print authResult
-			global fsRequestToken
-			fsRequestToken = authResult
-			# save token to file
-			global hasToken
-			hasToken = 1
-			tokenFile = open(userPreferencesDir + 'tokenFile','w')
-			tokenFile.write(fsRequestToken.to_string())		
-			tokenFile.close()
-			global fsRequestTokenString
-			fsRequestTokenString = fsRequestToken.to_string()
-			print fsRequestTokenString
-			params = cgi.parse_qs(fsRequestTokenString, keep_blank_values=False)
-			key = params['oauth_token'][0]
-			global fsKey
-			fsKey = key
-			secret = params['oauth_token_secret'][0]
-			global fsSecret
-			fsSecret = secret
-	
-			fsRequestToken = oauth.OAuthToken(key, secret)
-			print fsRequestToken
-			print fsKey
-			print fsSecret
 
-			self.pause()
-			# authorize the token
-			oauth_request = oauth.OAuthRequest.from_token_and_callback(token=fsRequestToken, http_url=client.authorization_url)
-			response = client.authorize_token(oauth_request)
-			print response
-			self.close()
-		else:
-			# login incorrect, display error
-			self.lblError.setText('Username or password incorrect')
 
 class ConfirmSignOutDialog(QtGui.QDialog):
 	def __init__(self, parent=None):
@@ -1497,9 +1688,9 @@ class ConfirmSignOutDialog(QtGui.QDialog):
 		doingSignout = False
 		self.close()
 
-class FriendCheckinDetailDialog(QtGui.QDialog):
+class FriendCheckinDetailDialog(QtGui.QMainWindow):
 	def __init__(self, id, parent=None):
-		QtGui.QDialog.__init__(self, parent)	
+		QtGui.QMainWindow.__init__(self, parent)	
 
 		self.resize(800,480)
 
@@ -1537,10 +1728,33 @@ class FriendCheckinDetailDialog(QtGui.QDialog):
 			for node in checkinNodes:
 				vid = node.getElementsByTagName('id')[0].firstChild.data
 				if vid == id:
-					self.strLatLon = node.getElementsByTagName('geolat')[0].firstChild.data + ',' + node.getElementsByTagName('geolong')[0].firstChild.data
-					self.web.load(QtCore.QUrl('http://maps.google.com/maps/api/staticmap?center=' + self.strLatLon + '&size=600x250&maptype=roadmap&markers=color:red|' + self.strLatLon + '&zoom=14&sensor=false&key=' + GOOGLE_MAPS_API_KEY))
+					geolatNodes = node.getElementsByTagName('geolat')
+					geolongNodes = node.getElementsByTagName('geolong')
+					if geolatNodes.length > 0 and geolongNodes.length > 0:
+						self.strLatLon = geolatNodes[0].firstChild.data + ',' + geolongNodes[0].firstChild.data
+						self.web.load(QtCore.QUrl('http://maps.google.com/maps/api/staticmap?center=' + self.strLatLon + '&size=600x250&maptype=roadmap&markers=color:red|' + self.strLatLon + '&zoom=14&sensor=false&key=' + GOOGLE_MAPS_API_KEY))
+					else:
+						self.web.hide()
 					self.setWindowTitle(node.getElementsByTagName('display')[0].firstChild.data)
 					self.lblName.setText(node.getElementsByTagName('display')[0].firstChild.data)
+
+class SettingsDialog(QtGui.QDialog):
+	def __init__(self, parent=None):
+		QtGui.QDialog.__init__(self, parent)	
+		self.setWindowTitle('Settings')
+		self.resize(800,480)
+		self.scrollableArea = QtGui.QScrollArea(self)
+	
+		# add the child widget to the scroll area
+		self.childWidget = QWidget()
+		self.scrollableArea.setWidget(self.childWidget)
+		
+		# use box layout - add scrollable area for settings
+		
+		# 
+		self.chkEnableAutoFriendsRefresh = QtGui.QCheckBox('Enable auto refresh of friends list',self)
+		
+		
 
 class LocationSettingsDialog(QtGui.QDialog):
 	def __init__(self, parent=None):
@@ -1584,6 +1798,7 @@ class LocationSettingsDialog(QtGui.QDialog):
 
 	def doBttnOkClicked(self):
 		global locationMethodType
+		currentType = locationMethodType
 		if self.radioLocationUSER.isChecked():
 			locationMethodType = 0
 		elif self.radioLocationCWP.isChecked():
@@ -1598,360 +1813,214 @@ class LocationSettingsDialog(QtGui.QDialog):
 		print 'locationMethodType: %d' % locationMethodType
 		locationMethodFile.write(str(locationMethodType) + '\n')
 		locationMethodFile.close()
+		if currentType != locationMethodType:
+			reply = QtGui.QMessageBox.question(self, 'Location Method Changed',"Attempt to acquire your location based on your new settings?", QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
+			if reply == QtGui.QMessageBox.Yes:
+				print 'reinit location process'
+				# reinit the location settings	
+				global locationManagerObj
+				locationManagerObj.restartSubprocess()	
 		self.close()
-		
-class MainWindow(QtGui.QMainWindow):
-	def __init__(self, parent=None):
-		QtGui.QMainWindow.__init__(self, parent)
-
-		self.setWindowTitle('BarrioSquare')
-		self.processDlg = None
-		# set menu
-		# self.menubar = self.menuBar()
-		# entry = self.menubar.addAction('&About')
-		# entry = self.menubar.addAction('&Sign Out')
 
 
-		#label = QtGui.QLabel('testing', self)
-		#label.setGeometry(10, 60, 50, 20)
+class LoadNearbyVenuesFromFile(QtCore.QThread):
+	def __init__(self, parent = None):
+    		QtCore.QThread.__init__(self, parent)
+		self.exiting = False
 
-		self.resize(800,480)
-
-		# add menu
-		#
-		# self.menuBar = QtGui.QMenuBar(self)
-		# self.menuBarMainMenu = self.menuBar.addMenu('BQ')
-		# if (fsRequestToken == None):
-		#	self.menuBarMainMenuSignInOut = self.menuBarMainMenu.addAction('Sign In')
-		# else:
-		#	self.menuBarMainMenuSignInOut = self.menuBarMainMenu.addAction('Sign Out')
-
-		if (fsRequestToken == None):
-			self.bttnSignIn = QtGui.QPushButton('Sign In', self)
-		else:
-			self.bttnSignIn = QtGui.QPushButton('Sign Out', self)			
-		self.bttnSignIn.setGeometry(5, 338, 150, 80)
-		self.bttnSignIn.setStyleSheet(QPUSHBUTTON_DEFAULT)
-
-		# button for search
-		self.bttnSearch = QtGui.QPushButton('Search', self)			
-		self.bttnSearch.setGeometry(480, 338, 150, 80)
-		self.bttnSearch.setStyleSheet(QPUSHBUTTON_DEFAULT)
-
-		# button for location
-		self.bttnLocation = QtGui.QPushButton('My Info', self)			
-		self.bttnLocation.setGeometry(322, 338, 150, 80)
-		self.bttnLocation.setStyleSheet(QPUSHBUTTON_DEFAULT)
-
-		# button for settings
-		self.bttnSettings = QtGui.QPushButton('Settings', self)			
-		self.bttnSettings.setGeometry(164, 338, 150, 80)
-		self.bttnSettings.setStyleSheet(QPUSHBUTTON_DEFAULT)
-
-		# push menu
-		self.settingsMenu = QtGui.QMenu(self)
-		self.settingsMenuClearCacheAction = self.settingsMenu.addAction('Clear Cache')
-		self.settingLocationMenuAction = self.settingsMenu.addAction('Location Settings')
-
-		self.connect(self.settingLocationMenuAction, QtCore.SIGNAL("triggered()"), self.doShowLocationSettingsDialog)
-
-		self.bttnSettings.setMenu(self.settingsMenu)
-
-		self.connect(self.bttnLocation, QtCore.SIGNAL('clicked()'),
-			self.doShowLocationDialog)
-
-		if (fsRequestToken == None):
-			self.bttnSearch.hide()
-			self.bttnLocation.hide()
-
-		# button for refresh
-		self.bttnRefresh = QtGui.QPushButton('Refresh', self)			
-		self.bttnRefresh.setGeometry(638, 338, 150, 80)
-		self.bttnRefresh.setStyleSheet(QPUSHBUTTON_DEFAULT)
-
-		if (fsRequestToken == None):
-			self.bttnRefresh.hide()
-
-		# dialog for sign in
-		self.signInDlg = SignInDialog()
-
-		# dialog for search
-		self.searchDlg = SearchDialog()
-
-		# add a tab widget
-		self.tabWidget = QtGui.QTabWidget(self)
-		self.tabWidget.setGeometry(10, 10, 790, 320)
-
-		self.friendsTab = QtGui.QWidget()
-		self.tabWidget.addTab(self.friendsTab, QtCore.QString())
-
-		self.placesTab = QtGui.QWidget()
-		self.tabWidget.addTab(self.placesTab, QtCore.QString())
-
-		self.historyTab = QtGui.QWidget()
-		self.tabWidget.addTab(self.historyTab, QtCore.QString())
-
-		self.searchResultsTab = QtGui.QWidget()
-		self.tabWidget.addTab(self.searchResultsTab, QtCore.QString())
-
-		self.tabWidget.setTabText(self.tabWidget.indexOf(self.friendsTab),QtGui.QApplication.translate('MainWindow','Friends','Friends',QtGui.QApplication.UnicodeUTF8))
-		self.tabWidget.setTabText(self.tabWidget.indexOf(self.placesTab),QtGui.QApplication.translate('MainWindow','Places','Places',QtGui.QApplication.UnicodeUTF8))
-		self.tabWidget.setTabText(self.tabWidget.indexOf(self.historyTab),QtGui.QApplication.translate('MainWindow','History','History',QtGui.QApplication.UnicodeUTF8))
-		self.tabWidget.setTabText(self.tabWidget.indexOf(self.searchResultsTab),QtGui.QApplication.translate('MainWindow','Search Results','Search Results',QtGui.QApplication.UnicodeUTF8))
-		
-		self.tabWidget.setStyleSheet("QTabBar::tab { height: 50px; width: 180px; }");
-
-		# add list widget for friends
-		self.friendsListWidget = QtGui.QListWidget(self.friendsTab)
-		self.friendsListWidget.setGeometry(0, 0, 760, 270) #310
-		self.friendsListWidget.setStyleSheet(QLISTWIDGET_DEFAULT)
-
-		p = self.friendsListWidget.palette()
-		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
-		p = self.friendsListWidget.setPalette(p)
-
-		# add list widget for places
-		self.placesListWidget = QtGui.QListWidget(self.placesTab)
-		self.placesListWidget.setGeometry(0, 0, 760, 270) #310
-		
-		p = self.placesListWidget.palette()
-		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
-		p = self.placesListWidget.setPalette(p)
-
-		# add list widget for history
-		self.historyListWidget = QtGui.QListWidget(self.historyTab)
-		self.historyListWidget.setGeometry(0, 0, 760, 270) #310
-		self.historyListWidget.setStyleSheet(QLISTWIDGET_DEFAULT)
-
-		p = self.historyListWidget.palette()
-		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
-		p = self.historyListWidget.setPalette(p)
-
-		# add list widget for search
-		self.searchListWidget = QtGui.QListWidget(self.searchResultsTab)
-		self.searchListWidget.setGeometry(0, 0, 760, 270) #310
-		self.searchListWidget.setStyleSheet(QLISTWIDGET_DEFAULT)
-
-		p = self.searchListWidget.palette()
-		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
-		p = self.searchListWidget.setPalette(p)
-
-		self.refreshFriendsWorker = RefreshFriendsWorkerThread()
-		self.connect(self.refreshFriendsWorker, QtCore.SIGNAL('finished()'), self.loadFriendsCheckingsResultsFromFile)
-
-		self.nearbyPlacesWorker = NearbyWorkerThread()
-		self.connect(self.nearbyPlacesWorker, QtCore.SIGNAL('finished()'), self.loadNearby)
-
-		self.connect(self.bttnSignIn, QtCore.SIGNAL('clicked()'),
-				self.doSignInClicked)	
-
-		self.signInDlg = SignInDialog()		
-		self.connect(self.signInDlg, QtCore.SIGNAL('finished(int)'),
-			self.onSignInDialogClosed)
-
-		self.confirmSignOutDlg = ConfirmSignOutDialog()
-		self.connect(self.confirmSignOutDlg, QtCore.SIGNAL('finished(int)'),
-			self.onSignOutDialogClosed)
-
-		self.connect(self.bttnRefresh, QtCore.SIGNAL('clicked()'),
-			self.doRefreshListWidget)		
-		self.connect(self.bttnSearch, QtCore.SIGNAL('clicked()'),
-			self.showSearchDialog)
-		print 'Bind Places signal'
-		self.connect(self.placesListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
-			self.doNearbyItemClicked)
-		print 'Bind Search signal'
-		self.connect(self.searchListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
-			self.doNearbyItemClicked)
-		print 'Bind Friends signal'
-		self.connect(self.friendsListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
-			self.doFriendItemClicked)
-		
-
-		# get list of nearby places - this probably needs to be threaded to prevent hanging
-		if (fsRequestToken != None):
-			self.loadLoggedInUserInfoFromCache()
-			self.doGetUserDetailForLoggedInUser()
-			if (not os.path.exists(userPreferencesDir + 'checkinsResultsCache.xml')):
-				self.doLoadFriendsCheckings()
-			else:
-				self.loadFriendsCheckingsResultsFromFile()			
-			if (not os.path.exists(userPreferencesDir + 'nearbyCache.xml')):
-				self.getNearby()
-			else:
-				self.loadNearby()
-			if os.path.exists(userPreferencesDir + 'historyCache.xml'):
-				self.reloadMainWindowWithHistoryResults()
-		# else:
-		#	self.doSignInClicked()
-		self.historyWorker = HistoryWorkerThread()
-		self.connect(self.historyWorker, QtCore.SIGNAL('finished()'),
-			self.historyFinished)
-		self.connect(self.historyWorker, QtCore.SIGNAL('reloadMainWindowWithResultsOfHistory()'), self.reloadMainWindowWithHistoryResults)
-
-	def doShowLocationSettingsDialog(self):
-		print 'doShowLocationSettingsDialog'
-		self.locationSettingsDlg = LocationSettingsDialog()
-		self.locationSettingsDlg.show()
-
-	def historyFinished(self):
-		if self.processDlg != None:
-			self.processDlg.close()
-
-	def simpleNetworkTest(self):
-		networkResult = False
-		try:
-			response = urllib2.urlopen('http://foursquare.com/img/scoring/3.png')
-			networkResult = True
-		except:
-			networkResult = False
-		return networkResult
-
-	def testNetworkConnection(self):
-		client3 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, API_PREFIX_URL+'test', ACCESS_TOKEN_URL, AUTHORIZATION_URL)
-		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
-		signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
-		signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
-	
-		nearbyParams = {
-			'test':	'ok'
-		}
-		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'test', parameters=nearbyParams)
-		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
-		print oauth_request.to_postdata()
-		testResultXml = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'test', requestType='GET')
-
-	def reloadMainWindowWithHistoryResults(self):
-		print 'reloadMainWindowWithHistoryResults'
-		historyXmlFile = open(userPreferencesDir + 'historyCache.xml','r')
-		historyXmlString = ''
-		for line in historyXmlFile:
-			historyXmlString += line
-		historyXmlFile.close()
-		# print nearbyXmlString
-		historyXml = parseString(historyXmlString)
-
-		# remove items from list
-		self.historyListWidget.clear()
-
-		# loop over xml venues and add to list widget
-		historyNodes = historyXml.getElementsByTagName('checkin')
-		for node in historyNodes:
-			nearbyItem = QtGui.QListWidgetItem('',self.historyListWidget)	
-			nearbyItem.setSizeHint(QtCore.QSize(690, 75))
-			wItem = VenueListItem()
-			addressString = ''
-			addressNode = node.getElementsByTagName('address')
-			if addressNode.length > 0:
-				if addressNode[0].firstChild != None:
-					addressString = addressNode[0].firstChild.data
-
-			crossstreetNode = node.getElementsByTagName('crossstreet')
-			if crossstreetNode.length > 0:
-				if crossstreetNode[0].firstChild != None:
-					addressString += ' (' + crossstreetNode[0].firstChild.data + ')'
-
-			dateStr = self.calcDateString(node.getElementsByTagName('created')[0].firstChild.data)
-			addressString += ' ~' + dateStr
-
-			wItem.setText(node.getElementsByTagName('name')[0].firstChild.data,addressString)
-			self.historyListWidget.setItemWidget(nearbyItem,wItem)
-			nearbyItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
-
-
-			# print node.getElementsByTagName('id')[0].firstChild.data
-			# searchPlaceString = node.getElementsByTagName('name')[0].firstChild.data
-			# searchPlaceString += ' (' + self.calcMetersAsString(node.getElementsByTagName('distance')[0].firstChild.data) + ')'
-			# searchItem = QtGui.QListWidgetItem(searchPlaceString,self.searchListWidget)
-			# searchItem.setFont(QtGui.QFont('Helvetica', 30))
-			# searchItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)			
-
-	def doShowLocationDialog(self):
-		global currentLatitude
-		global currentLongitude
-
-		strLatLon = '%f' % currentLatitude
-		strLatLon += ',%f' % currentLongitude
-
-		self.locationDialog = MyLocationDialog(strLatLon)
-		self.locationDialog.show()
-
-	def doSignInClicked(self):
-		print 'doSignInClicked'
-		global fsRequestToken
-	
-		if fsRequestToken == None:
-			self.signInDlg.show()
-		else:
-			global doingSignout
-			doingSignout = False		
-			self.confirmSignOutDlg.show()
-
-	def doRefreshListWidget(self):
-		# see which tab is showing
-		# self.getNearby()
-		print 'current tab index: %d' % self.tabWidget.currentIndex()
-
-		if self.tabWidget.currentIndex() < 3:
-			refreshTxt = ''
-			if self.tabWidget.currentIndex() == 0:
-				refreshTxt = 'Please wait while we contact the server to refresh your friends\' recent checkin list. This action may take up to 30 seconds to complete depending on the server load.'
-			elif self.tabWidget.currentIndex() == 1:
-				refreshTxt = 'Please wait while we contact the server to refresh the neaby venue list. This action may take up to 30 seconds to complete depending on the server load.'
-			elif self.tabWidget.currentIndex() == 2:
-				refreshTxt = 'Please wait while we contact the server to refresh your checkin history. This action may take up to 30 seconds to complete depending on the server load.'
-
-			self.processDlg = ProcessingDialog('Refreshing',refreshTxt)
-			self.processDlg.show()
-			if self.tabWidget.currentIndex() == 0:
-				# refresh friends
-				self.doLoadFriendsCheckings()
-			elif self.tabWidget.currentIndex() == 1:
-				# refresh nearby
-				self.getNearby()
-			elif self.tabWidget.currentIndex() == 2:
-				self.historyWorker.start()
-
-	def doGetUserDetailForLoggedInUser(self):
-		print 'doGetUserDetailForLoggedInUser'
-		thread.start_new_thread(self.doGetUserDetailInBackgroundThread,('username',0))
-
-	def loadLoggedInUserInfoFromCache(self):
-		print 'loadLoggedInUserInfoFromCache'
-		if os.path.exists(userPreferencesDir + 'userDetailCache.xml'):
-			userXmlFile = open(userPreferencesDir + 'userDetailCache.xml','r')
-			userXmlString = ''
-			for line in userXmlFile:
-				userXmlString += line
-			userXmlFile.close()
-			print userXmlString
-			parseSuccess = False
-			try:
-				userXml = parseString(userXmlString)
-				parseSuccess = True
-			except xml.parsers.expat.ExpatError:
-				print 'error parsing userXmlString'
-				parseSuccess = False
-			if parseSuccess == True:
-				global loggedInUserID
-				userNode = userXml.getElementsByTagName('user')
-			
-				try:
-					loggedInUserID = int(userNode[0].getElementsByTagName('id')[0].firstChild.data)
-					print 'logged in user: %d' % loggedInUserID	
-				except IndexError:
-					print 'unable to read userID from response'
-					loggedInUserID = 0	
-
-	def doGetUserDetailInBackgroundThread(u,uid,*args):
+	def run(self):
 		global qb
-		print 'doGetUserDetailInBackgroundThread'
+		nearbyXmlFile = open(userPreferencesDir + 'nearbyCache.xml','r')
+		nearbyXmlString = ''
+		for line in nearbyXmlFile:
+			nearbyXmlString += line
+		nearbyXmlFile.close()
+		parseSuccess = False
+		# print nearbyXmlString
+		try:
+			nearbyXml = parseString(nearbyXmlString)
+			parseSuccess = True
+		except xml.parsers.expat.ExpatError:
+			parseSuccess = False
+
+		if parseSuccess:
+			# remove items from list
+			self.emit(QtCore.SIGNAL('clearPlacesListWidget()'))
+
+			# loop over xml venues and add to list widget
+			nearbyNodes = nearbyXml.getElementsByTagName('venue')
+			for node in nearbyNodes:
+				# print node.getElementsByTagName('id')[0].firstChild.data
+				addressString = ''
+				addressNode = node.getElementsByTagName('address')
+				if addressNode.length > 0:
+					if addressNode[0].firstChild != None:
+						addressString = addressNode[0].firstChild.data
+				if node.getElementsByTagName('crossstreet').length > 0:
+					addressString += ' (' + node.getElementsByTagName('crossstreet')[0].firstChild.data + ')'
+				addressString += ' ~' + qb.calcMetersAsString(node.getElementsByTagName('distance')[0].firstChild.data)
+				venueName = node.getElementsByTagName('name')[0].firstChild.data
+				self.emit(QtCore.SIGNAL('addItemToPlacesListWidget'),venueName,addressString,node.getElementsByTagName('id')[0].firstChild.data)
+
+				# nearbyPlaceString = node.getElementsByTagName('name')[0].firstChild.data
+				# nearbyPlaceString += ' (' + self.calcMetersAsString(node.getElementsByTagName('distance')[0].firstChild.data) + ')'
+				# nearbyItem = QtGui.QListWidgetItem(nearbyPlaceString,self.placesListWidget)
+				# nearbyItem.setFont(QtGui.QFont('Helvetica', 30))
+				# nearbyItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
+		else:
+			print 'parseSuccess is False'		
+		self.emit(QtCore.SIGNAL('dismissProcessingDialog()'))
+
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+
+
+class LoadFriendsCheckinsFromFile(QtCore.QThread):
+	def __init__(self, parent = None):
+    		QtCore.QThread.__init__(self, parent)
+		self.exiting = False
+
+	def run(self):
+		global qb
+		global infoNoticeString
+		checkinsXmlFile = open(userPreferencesDir + 'checkinsResultsCache.xml','r')
+		checkinXmlString = ''
+		for line in checkinsXmlFile:
+			checkinXmlString += line
+		checkinsXmlFile.close()
+		parseSuccess = False
+		try:
+			checkinsXml = parseString(checkinXmlString)
+			parseSuccess = True
+		except xml.parsers.expat.ExpatError:
+			parseSuccess = False
+			print checkinXmlString
+		if parseSuccess == True:
+
+			# remove items from list
+			self.emit(QtCore.SIGNAL('clearFriendsListWidget()'))
+
+			unauthorized = 0
+			# check unauthorized
+			try:
+				unauthorized = qb.checkUnauthorized(checkinsXml)
+			except AttributeError:
+				unauthorized = 0
+
+			if unauthorized > 0:
+				global doingSignout
+				doingSignout = True
+				self.emit(QtCore.SIGNAL('signOut()'))	
+				self.emit(QtCore.SIGNAL('dismissProcessingDialog()'))
+				if unauthorized == 1:
+					infoNoticeString = 'Error: Your foursquare.com token has expired'
+					self.emit(QtCore.SIGNAL('displayInfoNotice()'))		
+			else:
+				# switch the current tab to search tab
+				# self.tabWidget.setCurrentWidget(self.searchResultsTab)
+
+				# loop over xml venues and add to list widget
+				checkinNodes = checkinsXml.getElementsByTagName('checkin')
+				for node in checkinNodes:
+					# get photo
+					photoURL = node.getElementsByTagName('photo')[0].firstChild.data
+
+					venueNode = node.getElementsByTagName('venue')
+					OffGrid = False
+					if venueNode.length == 0:
+						print 'no venue info - off the grid'
+						OffGrid = True
+					photoURLchunks = photoURL.split('/')
+					photoFile = userPreferencesDir + 'imageCache' + os.sep + 'users' + os.sep + photoURLchunks[3] + '_' + photoURLchunks[4]
+					# print 'photoFile: ' + photoFile			
+					# if cached file doesn't exist for user, download it now
+					if not os.path.exists(photoFile):
+						self.getUserPhoto(photoURL)
+
+					# print node.getElementsByTagName('id')[0].firstChild.data
+					checkinString = node.getElementsByTagName('display')[0].firstChild.data + '\n'
+					if (node.getElementsByTagName('shout').length > 0):
+						checkinString += node.getElementsByTagName('shout')[0].firstChild.data
+					checkinString += node.getElementsByTagName('created')[0].firstChild.data
+
+					addressString = ''
+					addressNode = node.getElementsByTagName('address')
+					if addressNode.length > 0:
+						if addressNode[0].firstChild != None:
+							addressString += addressNode[0].firstChild.data
+					crosssStreetNode = node.getElementsByTagName('crossstreet')
+					if crosssStreetNode.length > 0:
+						if crosssStreetNode[0].firstChild != None:
+							addressString += ' (' + crosssStreetNode[0].firstChild.data + ')'
+					dateStr = qb.calcDateString(node.getElementsByTagName('created')[0].firstChild.data)
+					addressString += ' ~' + dateStr
+					displayStr = node.getElementsByTagName('display')[0].firstChild.data
+					shoutNodes = node.getElementsByTagName('shout')
+					# print 'shouts: %d' % shoutNodes.length
+					if shoutNodes.length > 0:
+						displayStr += ' ("' + shoutNodes[0].firstChild.data + '")'
+
+					if OffGrid:
+						self.emit(QtCore.SIGNAL('addItemToFriendsListWidget'),displayStr,addressString,photoFile,OffGrid,'-1')
+					else:
+						self.emit(QtCore.SIGNAL('addItemToFriendsListWidget'),displayStr,addressString,photoFile,OffGrid,node.getElementsByTagName('id')[0].firstChild.data)
+
+
+					# checkinItem = QtGui.QListWidgetItem('',self.friendsListWidget)
+					# checkinItem.setSizeHint(QtCore.QSize(770, 75))
+					# wItem = FriendListItem()
+
+
+					# wItem.setText(displayStr,addressString,'dateStr',photoFile)
+					# self.friendsListWidget.setItemWidget(checkinItem,wItem)
+					# if OffGrid:
+					# 	checkinItem.setStatusTip('-1')
+					# else:
+					#	checkinItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
+			
+				# checkinItem = QtGui.QListWidgetItem('',self.friendsListWidget)
+				# checkinItem.setSizeHint(QtCore.QSize(770, 75))
+				# wItem = FriendListItem()
+				# wItem.setText('','','',None)
+				# self.friendsListWidget.setItemWidget(checkinItem,wItem)
+				# checkinItem.setStatusTip('0')
+
+				self.emit(QtCore.SIGNAL('addItemToFriendsListWidget'),'','','',False,'0')
+				self.emit(QtCore.SIGNAL('dismissProcessingDialog()'))
+
+				if checkinNodes.length > 0:
+					infoNoticeString = 'Loaded %d recent friend checkins' % checkinNodes.length
+					self.emit(QtCore.SIGNAL('displayInfoNotice()'))				
+
+		else:
+			# parse error show error window
+			print 'parseSuccess is false'
+			self.emit(QtCore.SIGNAL('dismissProcessingDialog()'))
+
+		# if self.processDlg != None:
+		#	self.processDlg.close()
+
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+
+class LoadUserInfoFromServerThread(QtCore.QThread):
+	def __init__(self, parent = None):
+    		QtCore.QThread.__init__(self, parent)
+		self.exiting = False
+
+	def setup(self,userid):
+		self.userid = userid
+
+	def run(self):
+		# print 'doGetUserDetailInBackgroundThread'
 		client3 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, API_PREFIX_URL+'user', ACCESS_TOKEN_URL, AUTHORIZATION_URL)
 		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
 		signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
 		signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
-		print uid
-		if uid != 'username':
+		print self.userid
+		if self.userid > 0:
 			cacheFileName = 'userDetailCache_' + str(uid) + '.xml'
 			wsParams = {
 				'uid':	uid,
@@ -1967,24 +2036,25 @@ class MainWindow(QtGui.QMainWindow):
 			}
 		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'user', parameters=wsParams)
 		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
-		print oauth_request.to_postdata()
+		# print oauth_request.to_postdata()
 		userResultXml = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'user', requestType='GET')
-		print userResultXml		
+		# print userResultXml		
 		# save user data to cache file
-		userDetailCacheFile = open(userPreferencesDir + cacheFileName,'w')
-		userDetailCacheFile.write(userResultXml)
-		userDetailCacheFile.close()
 		parseSuccess = False
 		# process result
 		try:
 			userXml = parseString(userResultXml)
 			parseSuccess = True
+			userDetailCacheFile = open(userPreferencesDir + cacheFileName,'w')
+			userDetailCacheFile.write(userResultXml)
+			userDetailCacheFile.close()
 		except xml.parsers.expat.ExpatError:
 			print 'error parsing userResultXml!'
 			parseSuccess = False
+			print userResultXml
 
 		if parseSuccess == True:			
-			if uid == 0:
+			if self.userid == 0:
 				global loggedInUserID
 				userNode = userXml.getElementsByTagName('user')
 				loggedInUserID = int(userNode[0].getElementsByTagName('id')[0].firstChild.data)
@@ -2023,24 +2093,602 @@ class MainWindow(QtGui.QMainWindow):
 						badgeFile.close()
 
 
-				
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+
+class UserHistoryLoaderThread(QtCore.QThread):
+	def __init__(self, parent = None):
+    		QtCore.QThread.__init__(self, parent)
+		self.exiting = False
+
+	def run(self):
+		global qb
+		historyXmlFile = open(userPreferencesDir + 'historyCache.xml','r')
+		historyXmlString = ''
+		for line in historyXmlFile:
+			historyXmlString += line
+		historyXmlFile.close()
+		# print nearbyXmlString
+		parseSuccess = False
+		try:
+			historyXml = parseString(historyXmlString)
+			parseSuccess = True
+		except xml.parsers.expat.ExpatError:
+			parseSuccess = False
+
+		if parseSuccess:
+			# remove items from list
+			self.emit(QtCore.SIGNAL('clearHistoryListWidget()'))
+
+			# loop over xml venues and add to list widget
+			historyNodes = historyXml.getElementsByTagName('checkin')
+			for node in historyNodes:
+				addressString = ''
+				addressNode = node.getElementsByTagName('address')
+				if addressNode.length > 0:
+					if addressNode[0].firstChild != None:
+						addressString = addressNode[0].firstChild.data
+
+				crossstreetNode = node.getElementsByTagName('crossstreet')
+				if crossstreetNode.length > 0:
+					if crossstreetNode[0].firstChild != None:
+						addressString += ' (' + crossstreetNode[0].firstChild.data + ')'
+
+				dateStr = qb.calcDateString(node.getElementsByTagName('created')[0].firstChild.data)
+				addressString += ' ~' + dateStr
+				venueNodes = node.getElementsByTagName('venue')
+				venueName = ''
+				venueID = ''
+				OffGrid = True
+				shout = ''
+				if venueNodes.length > 0:
+					OffGrid = False
+					venueID = venueNodes[0].getElementsByTagName('id')[0].firstChild.data
+					venueName = venueNodes[0].getElementsByTagName('name')[0].firstChild.data
+				shoutNodes = node.getElementsByTagName('shout')
+				if shoutNodes.length > 0:
+					shout = shoutNodes[0].firstChild.data
+				if OffGrid:
+					self.emit(QtCore.SIGNAL('addItemToHistoryListWidget'),venueName,shout,addressString,OffGrid,'-1')
+				else:
+					self.emit(QtCore.SIGNAL('addItemToHistoryListWidget'),venueName,shout,addressString,OffGrid,venueID)
+
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+	
+class MainWindow(QtGui.QMainWindow):
+	def __init__(self, parent=None):
+		QtGui.QMainWindow.__init__(self, parent)
+
+		self.setWindowIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'barrioSquare.png')))
+
+		self.osso_c = osso.Context("barrioSquare", SHORT_VERSION_STRING, False)
+		self.osso_rpc = osso.Rpc(self.osso_c)
+
+		self.locationDialog = None
+		self.setWindowTitle('BarrioSquare')
+		self.processDlg = None
+		# set menu
+		# self.menubar = self.menuBar()
+		# entry = self.menubar.addAction('&About')
+		# entry = self.menubar.addAction('&Sign Out')
+
+
+		#label = QtGui.QLabel('testing', self)
+		#label.setGeometry(10, 60, 50, 20)
+
+		self.resize(800,480)
+
+		# add menu
+		#
+		# self.menuBar = QtGui.QMenuBar(self)
+		# self.menuBarMainMenu = self.menuBar.addMenu('BQ')
+		# if (fsRequestToken == None):
+		#	self.menuBarMainMenuSignInOut = self.menuBarMainMenu.addAction('Sign In')
+		# else:
+		#	self.menuBarMainMenuSignInOut = self.menuBarMainMenu.addAction('Sign Out')
+
+		if (fsRequestToken == None):
+			self.bttnSignIn = QtGui.QPushButton('', self)
+		else:
+			self.bttnSignIn = QtGui.QPushButton('', self)			
+		self.bttnSignIn.setGeometry(5, 338, 80, 80)
+		self.bttnSignIn.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnSignIn.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'signOutIcon.png')))
+		self.bttnSignIn.setIconSize(QtCore.QSize(70,70))
+
+		# button for search
+		self.bttnSearch = QtGui.QPushButton('', self)			
+		self.bttnSearch.setGeometry(620, 338, 80, 80)
+		self.bttnSearch.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnSearch.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'searchIcon.png')))
+		self.bttnSearch.setIconSize(QtCore.QSize(70,70))
+
+		# button for location
+		self.bttnLocation = QtGui.QPushButton('', self)			
+		self.bttnLocation.setGeometry(185, 338, 80, 80)
+		self.bttnLocation.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnLocation.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'myInfoIcon.png')))
+		self.bttnLocation.setIconSize(QtCore.QSize(70,70))
+
+		# button for settings
+		self.bttnSettings = QtGui.QPushButton('', self)			
+		self.bttnSettings.setGeometry(95, 338, 80, 80)
+		self.bttnSettings.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnSettings.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'settingsIcon.png')))
+		self.bttnSettings.setIconSize(QtCore.QSize(70,70))
+
+		self.bttnHistory = QtGui.QPushButton('', self)			
+		self.bttnHistory.setGeometry(345, 338, 80, 80)
+		self.bttnHistory.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnHistory.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'historyIcon.png')))
+		self.bttnHistory.setIconSize(QtCore.QSize(70,70))
+
+		self.connect(self.bttnHistory, QtCore.SIGNAL('clicked()'),
+			self.doShowHistoryTab)
+
+		self.bttnFriends = QtGui.QPushButton('', self)			
+		self.bttnFriends.setGeometry(435, 338, 86, 80)
+		self.bttnFriends.setStyleSheet(QPUSHBUTTON_HIGHLIGHT)
+		self.bttnFriends.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'friendsIcon.png')))
+		self.bttnFriends.setIconSize(QtCore.QSize(70,70))
+
+		self.connect(self.bttnFriends, QtCore.SIGNAL('clicked()'),
+			self.doShowFriendsTab)
+
+		self.bttnPlaces = QtGui.QPushButton('', self)			
+		self.bttnPlaces.setGeometry(530, 338, 80, 80)
+		self.bttnPlaces.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnPlaces.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'placesIcon.png')))
+		self.bttnPlaces.setIconSize(QtCore.QSize(70,70))
+
+		self.connect(self.bttnPlaces, QtCore.SIGNAL('clicked()'),
+			self.doShowPlacesTab)
+
+		# push menu
+		self.settingsMenu = QtGui.QMenu(self)
+
+		self.settingsMenuAboutAction = self.settingsMenu.addAction('About')
+		self.connect(self.settingsMenuAboutAction, QtCore.SIGNAL("triggered()"), self.doAboutActionTriggered)
+
+		self.settingsMenuClearCacheAction = self.settingsMenu.addAction('Clear Cache')
+		self.connect(self.settingsMenuClearCacheAction, QtCore.SIGNAL("triggered()"), self.doClearCacheActionTriggered)
+
+		self.settingLocationMenuAction = self.settingsMenu.addAction('Location Settings')
+
+		self.connect(self.settingLocationMenuAction, QtCore.SIGNAL("triggered()"), self.doShowLocationSettingsDialog)
+
+		self.bttnSettings.setMenu(self.settingsMenu)
+
+		self.connect(self.bttnLocation, QtCore.SIGNAL('clicked()'),
+			self.doShowLocationDialog)
+
+		if (fsRequestToken == None):
+			self.bttnSearch.hide()
+			self.bttnLocation.hide()
+			self.bttnPlaces.hide()
+			self.bttnFriends.hide()
+
+		# button for refresh
+		self.bttnRefresh = QtGui.QPushButton('', self)			
+		self.bttnRefresh.setGeometry(710, 338, 80, 80)
+		self.bttnRefresh.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnRefresh.setIcon(QtGui.QIcon(QtGui.QPixmap(APP_DIRECTORY + 'refreshIcon.png')))
+		self.bttnRefresh.setIconSize(QtCore.QSize(70,70))
+
+		if (fsRequestToken == None):
+			self.bttnRefresh.hide()
+
+		# dialog for sign in
+		self.signInDlg = SignInDialog()
+
+		# dialog for search
+		self.searchDlg = SearchDialog()
+
+		# add a tab widget
+		self.tabWidget = QtGui.QTabWidget(self)
+		self.tabWidget.setGeometry(0, 0, 800, 330)
+
+		self.friendsTab = QtGui.QWidget()
+		self.tabWidget.addTab(self.friendsTab, QtCore.QString())
+
+		self.placesTab = QtGui.QWidget()
+		self.tabWidget.addTab(self.placesTab, QtCore.QString())
+
+		self.historyTab = QtGui.QWidget()
+		self.tabWidget.addTab(self.historyTab, QtCore.QString())
+
+		self.searchResultsTab = QtGui.QWidget()
+		self.tabWidget.addTab(self.searchResultsTab, QtCore.QString())
+
+		self.tabWidget.setTabText(self.tabWidget.indexOf(self.friendsTab),QtGui.QApplication.translate('MainWindow','Friends','Friends',QtGui.QApplication.UnicodeUTF8))
+		self.tabWidget.setTabText(self.tabWidget.indexOf(self.placesTab),QtGui.QApplication.translate('MainWindow','Places','Places',QtGui.QApplication.UnicodeUTF8))
+		self.tabWidget.setTabText(self.tabWidget.indexOf(self.historyTab),QtGui.QApplication.translate('MainWindow','History','History',QtGui.QApplication.UnicodeUTF8))
+		self.tabWidget.setTabText(self.tabWidget.indexOf(self.searchResultsTab),QtGui.QApplication.translate('MainWindow','Search Results','Search Results',QtGui.QApplication.UnicodeUTF8))
+		
+		self.tabWidget.setStyleSheet("QTabBar::tab { height: 0px; width: 180px; }");
+
+		# add list widget for friends
+		self.friendsListWidget = QtGui.QListWidget(self.friendsTab)
+		self.friendsListWidget.setGeometry(0, 0, 820, 330) #310
+		self.friendsListWidget.setStyleSheet(QLISTWIDGET_DEFAULT)
+
+		p = self.friendsListWidget.palette()
+		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
+		p = self.friendsListWidget.setPalette(p)
+
+		# add list widget for places
+		self.placesListWidget = QtGui.QListWidget(self.placesTab)
+		self.placesListWidget.setGeometry(0, 0, 820, 330) #310
+		
+		p = self.placesListWidget.palette()
+		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
+		p = self.placesListWidget.setPalette(p)
+
+		# add list widget for history
+		self.historyListWidget = QtGui.QListWidget(self.historyTab)
+		self.historyListWidget.setGeometry(0, 0, 820, 330) #310
+		self.historyListWidget.setStyleSheet(QLISTWIDGET_DEFAULT)
+
+		p = self.historyListWidget.palette()
+		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
+		p = self.historyListWidget.setPalette(p)
+
+		# add list widget for search
+		self.searchListWidget = QtGui.QListWidget(self.searchResultsTab)
+		self.searchListWidget.setGeometry(0, 0, 820, 330) #310
+		self.searchListWidget.setStyleSheet(QLISTWIDGET_DEFAULT)
+
+		p = self.searchListWidget.palette()
+		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
+		p = self.searchListWidget.setPalette(p)
+
+		
+		# thread to load venues from file
+		self.loadNearbyVenuesWorker = LoadNearbyVenuesFromFile()
+		self.connect(self.loadNearbyVenuesWorker, QtCore.SIGNAL('clearPlacesListWidget()'), self.clearPlacesListWidget)
+		self.connect(self.loadNearbyVenuesWorker, QtCore.SIGNAL('addItemToPlacesListWidget'), self.addItemToPlacesListWidget)
+		self.connect(self.loadNearbyVenuesWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)
+		self.connect(self.loadNearbyVenuesWorker, QtCore.SIGNAL('dismissProcessingDialog()'), self.dismissProcessingDialog)
+
+		# thread to load checkins from file and update UI
+		self.loadFriendsCheckinsWorker = LoadFriendsCheckinsFromFile()
+		self.connect(self.loadFriendsCheckinsWorker, QtCore.SIGNAL('signOut()'),self.onSignOutDialogClosed)
+		self.connect(self.loadFriendsCheckinsWorker, QtCore.SIGNAL('clearFriendsListWidget()'), self.clearFriendsListWidget)
+		self.connect(self.loadFriendsCheckinsWorker, QtCore.SIGNAL('addItemToFriendsListWidget'), self.addItemToFriendsListWidget)
+		self.connect(self.loadFriendsCheckinsWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)
+		self.connect(self.loadFriendsCheckinsWorker, QtCore.SIGNAL('dismissProcessingDialog()'), self.dismissProcessingDialog)
+		self.connect(self.loadFriendsCheckinsWorker, QtCore.SIGNAL('finished()'), self.finishedLoadingFriendsCheckingsFromFile)
+
+		# worker thread to retrieve checkins from server
+		self.refreshFriendsWorker = RefreshFriendsWorkerThread()
+		self.connect(self.refreshFriendsWorker, QtCore.SIGNAL('finished()'), self.loadFriendsCheckingsResultsFromFile)
+		self.connect(self.refreshFriendsWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)
+
+		# nearby worker
+		self.nearbyPlacesWorker = NearbyWorkerThread()
+		self.connect(self.nearbyPlacesWorker, QtCore.SIGNAL('finished()'), self.loadNearby)
+
+		# user info fro server worker
+		self.loadUserInfoFromServerWorker = LoadUserInfoFromServerThread()
+		self.connect(self.loadUserInfoFromServerWorker ,QtCore.SIGNAL('finished()'),self.loadLoggedInUserInfoFromCache)
+
+		# history loader worker
+		self.historyLoaderWorker = UserHistoryLoaderThread()
+		self.connect(self.historyLoaderWorker, QtCore.SIGNAL('clearHistoryListWidget()'), self.clearHistoryListWidget)
+		self.connect(self.historyLoaderWorker, QtCore.SIGNAL('addItemToHistoryListWidget'), self.addItemToHistoryListWidget)
+
+		self.connect(self.bttnSignIn, QtCore.SIGNAL('clicked()'),
+				self.doSignInClicked)	
+
+		self.signInDlg = SignInDialog()		
+		self.connect(self.signInDlg, QtCore.SIGNAL('signOutFinished()'),
+			self.onSignInDialogClosed)
+
+		self.confirmSignOutDlg = ConfirmSignOutDialog()
+		self.connect(self.confirmSignOutDlg, QtCore.SIGNAL('finished(int)'),
+			self.onSignOutDialogClosed)
+
+		self.connect(self.bttnRefresh, QtCore.SIGNAL('clicked()'),
+			self.doRefreshListWidget)		
+		self.connect(self.bttnSearch, QtCore.SIGNAL('clicked()'),
+			self.showSearchDialog)
+		# print 'Bind Places signal'
+		self.connect(self.placesListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
+			self.doNearbyItemClicked)
+		# print 'Bind Search signal'
+		self.connect(self.searchListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
+			self.doNearbyItemClicked)
+		# print 'Bind Friends signal'
+		self.connect(self.friendsListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
+			self.doFriendItemClicked)
+		self.connect(self.historyListWidget, QtCore.SIGNAL('itemClicked(QListWidgetItem*)'),
+			self.doNearbyItemClicked)		
+
+		if (fsRequestToken != None):
+			self.loadLoggedInUserInfoFromCache()
+			self.doGetUserDetailForLoggedInUser()
+			if (not os.path.exists(userPreferencesDir + 'checkinsResultsCache.xml')):
+			 	self.doLoadFriendsCheckings()
+			else:
+			 	self.loadFriendsCheckingsResultsFromFile()			
+			if (not os.path.exists(userPreferencesDir + 'nearbyCache.xml')):
+				self.getNearby()
+			else:
+			 	self.loadNearby()
+			if os.path.exists(userPreferencesDir + 'historyCache.xml'):
+			 	self.reloadMainWindowWithHistoryResults()
+		# else:
+		#	self.doSignInClicked()
+		self.historyWorker = HistoryWorkerThread()
+		self.connect(self.historyWorker, QtCore.SIGNAL('finished()'),
+			self.historyFinished)
+		self.connect(self.historyWorker, QtCore.SIGNAL('reloadMainWindowWithResultsOfHistory()'), self.reloadMainWindowWithHistoryResults)
+
+	def doAboutActionTriggered(self):
+		QtGui.QMessageBox.about(self, 'About ' + VERSION_STRING,"Copyright (c) 2010 Chili Technologies LLC\nVisit http://google.com/group/barriosquare or http://chilitechno.com/fster for more information.")
+
+	def doClearCacheActionTriggered(self):
+		reply = QtGui.QMessageBox.question(self, 'Clear Cache?',"Are you sure you want to clear the cache? Cached place data, recent history, friends checkins, and other resources will be removed from device.", QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
+		if reply == QtGui.QMessageBox.Yes:
+			# TODO: do delete cache items
+			print 'TODO'
+
+	def finishedLoadingFriendsCheckingsFromFile(self):
+		global friendRefreshCount
+		friendRefreshCount = friendRefreshCount + 1
+		print 'friendRefreshCount = %d' % friendRefreshCount
+		# track friends reload count - if first reload count, i.e. first reload from startup, then do another refresh
+		if friendRefreshCount == 1:
+			self.doLoadFriendsCheckings()
+		
+	def closeEvent(self, event):
+		reply = QtGui.QMessageBox.question(self, 'Quit?',"Are you sure you want to quit barrioSquare?", QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
+		if reply == QtGui.QMessageBox.Yes:
+			global getLocationChildPID
+			if getLocationChildPID > 0:
+				# kill subprocess before exit
+				os.kill(getLocationChildPID, 9)
+			event.accept()				
+		else:
+			event.ignore()
+
+	def checkUnauthorized(self,xmlString):
+		IsUnauthorized = 0
+		unauthorizedNodes = xmlString.getElementsByTagName('unauthorized')
+		if unauthorizedNodes.length > 0:
+			IsUnauthorized = 1
+			if unauthorizedNodes[0].firstChild.data == 'TOKEN_EXPIRED':
+				IsUnauthorized = 1
+		else:
+			IsUnauthorized = 0
+		return IsUnauthorized
+
+	def addItemToFriendsListWidget(self,displayStr,addressString,photoFile,OffGrid,checkinId):
+		# this method is called from our worker thread to update UI on main thread
+		checkinItem = QtGui.QListWidgetItem('',self.friendsListWidget)
+		checkinItem.setSizeHint(QtCore.QSize(770, 75))
+		wItem = FriendListItem()
+
+		wItem.setText(displayStr,addressString,'dateStr',photoFile)
+		self.friendsListWidget.setItemWidget(checkinItem,wItem)
+		if OffGrid:
+			checkinItem.setStatusTip('-1')
+		else:
+			checkinItem.setStatusTip(checkinId)
+
+	def addItemToHistoryListWidget(self,venueName,shout,addressString,OffGrid,venueID):
+		nearbyItem = QtGui.QListWidgetItem('',self.historyListWidget)	
+		nearbyItem.setSizeHint(QtCore.QSize(770, 75))
+		wItem = VenueListItem()
+		if venueName != '':
+			wItem.setText(venueName,addressString)
+		else:
+			wItem.setText('You said: ' + shout,addressString)
+		self.historyListWidget.setItemWidget(nearbyItem,wItem)
+		nearbyItem.setStatusTip(venueID)
+
+	def addItemToPlacesListWidget(self,venueName,addressString,venueID):
+		nearbyItem = QtGui.QListWidgetItem('',self.placesListWidget)	
+		nearbyItem.setSizeHint(QtCore.QSize(770, 75))
+		wItem = VenueListItem()
+		wItem.setText(venueName,addressString)
+		self.placesListWidget.setItemWidget(nearbyItem,wItem)
+		nearbyItem.setStatusTip(venueID)
+
+	def clearHistoryListWidget(self):
+		self.historyListWidget.clear()
+			
+	def clearPlacesListWidget(self):
+		self.placesListWidget.clear()
+
+	def clearFriendsListWidget(self):
+		self.friendsListWidget.clear()
+	
+	def doShowHistoryTab(self):
+		self.bttnFriends.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnPlaces.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnSearch.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnHistory.setStyleSheet(QPUSHBUTTON_HIGHLIGHT)
+		self.tabWidget.setCurrentWidget(self.historyTab)
+
+	def doShowFriendsTab(self):
+		self.bttnFriends.setStyleSheet(QPUSHBUTTON_HIGHLIGHT)
+		self.bttnPlaces.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnSearch.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnHistory.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.tabWidget.setCurrentWidget(self.friendsTab)
+
+	def doShowPlacesTab(self):
+		self.bttnFriends.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnPlaces.setStyleSheet(QPUSHBUTTON_HIGHLIGHT)
+		self.bttnSearch.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnHistory.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.tabWidget.setCurrentWidget(self.placesTab)
+
+	def doShowLocationSettingsDialog(self):
+		# print 'doShowLocationSettingsDialog'
+		self.locationSettingsDlg = LocationSettingsDialog()
+		self.locationSettingsDlg.show()
+
+	def historyFinished(self):
+		if self.processDlg != None:
+			self.processDlg.close()
+
+	def simpleNetworkTest(self):
+		networkResult = False
+		try:
+			response = urllib2.urlopen('http://foursquare.com/img/scoring/3.png')
+			networkResult = True
+		except:
+			networkResult = False
+		return networkResult
+
+	def testNetworkConnection(self):
+		client3 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, API_PREFIX_URL+'test', ACCESS_TOKEN_URL, AUTHORIZATION_URL)
+		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
+		signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
+		signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
+	
+		nearbyParams = {
+			'test':	'ok'
+		}
+		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'test', parameters=nearbyParams)
+		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
+		print oauth_request.to_postdata()
+		testResultXml = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'test', requestType='GET')
+
+	def reloadMainWindowWithHistoryResults(self):
+		# print 'reloadMainWindowWithHistoryResults'
+		# start the history worker loader thread
+		self.historyLoaderWorker.start()
+	
+	def dismissProcessingDialog(self):
+		if self.processDlg != None:
+			self.processDlg.close()		
+
+	def displayInfoNotice(self,infoString):
+		note = osso.SystemNote(self.osso_c)
+		result = note.system_note_infoprint(infoString)
+
+	def displayInfoNoticeGlobal(self):
+		global infoNoticeString
+		self.displayInfoNotice(infoNoticeString)
+
+	def locationAcquired(self):
+		print 'locationAcquired'
+		self.displayInfoNotice('Location Updated')
+		if self.locationDialog != None:		
+			strLatLon = '%f' % currentLatitude
+			strLatLon += ',%f' % currentLongitude
+			print strLatLon
+			self.locationDialog.strLatLon = strLatLon
+			self.locationDialog.web.load(QtCore.QUrl('http://maps.google.com/maps/api/staticmap?center=' + self.locationDialog.strLatLon + '&size=600x245&maptype=roadmap&markers=color:red|' + self.locationDialog.strLatLon + '&zoom=14&sensor=false&key=' + GOOGLE_MAPS_API_KEY))
+		
+	def doShowLocationDialog(self):
+		global currentLatitude
+		global currentLongitude
+
+		strLatLon = '%f' % currentLatitude
+		strLatLon += ',%f' % currentLongitude
+
+		self.locationDialog = MyLocationDialog(strLatLon)
+		self.locationDialog.show()
+
+	def doSignInClicked(self):
+		# print 'doSignInClicked'
+		global fsRequestToken
+	
+		if fsRequestToken == None:
+			self.signInDlg.show()
+		else:
+			global doingSignout
+			doingSignout = False		
+			self.confirmSignOutDlg.show()
+
+	def doRefreshListWidget(self):
+		# see which tab is showing
+		# self.getNearby()
+		print 'current tab index: %d' % self.tabWidget.currentIndex()
+
+		if self.tabWidget.currentIndex() < 3:
+			refreshTxt = ''
+			if self.tabWidget.currentIndex() == 0:
+				refreshTxt = 'Please wait while we contact the server to refresh your friends\' recent checkin list. This action may take up to 30 seconds to complete depending on the server load.'
+			elif self.tabWidget.currentIndex() == 1:
+				refreshTxt = 'Please wait while we contact the server to refresh the nearby venue list. This action may take up to 30 seconds to complete depending on the server load.'
+			elif self.tabWidget.currentIndex() == 2:
+				refreshTxt = 'Please wait while we contact the server to refresh your checkin history. This action may take up to 30 seconds to complete depending on the server load.'
+
+			self.processDlg = ProcessingDialog('Refreshing',refreshTxt)
+			self.processDlg.show()
+			if self.tabWidget.currentIndex() == 0:
+				# refresh friends
+				self.doLoadFriendsCheckings()
+			elif self.tabWidget.currentIndex() == 1:
+				# refresh nearby
+				self.getNearby()
+			elif self.tabWidget.currentIndex() == 2:
+				self.historyWorker.start()
+
+	def doGetUserDetailForLoggedInUser(self):
+		# print 'doGetUserDetailForLoggedInUser'
+		# call worker thread
+		self.loadUserInfoFromServerWorker.setup(0)
+		self.loadUserInfoFromServerWorker.start()
+
+	def loadLoggedInUserInfoFromCache(self):
+		# print 'loadLoggedInUserInfoFromCache'
+		if os.path.exists(userPreferencesDir + 'userDetailCache.xml'):
+			userXmlFile = open(userPreferencesDir + 'userDetailCache.xml','r')
+			userXmlString = ''
+			for line in userXmlFile:
+				userXmlString += line
+			userXmlFile.close()		
+			parseSuccess = False
+			try:
+				userXml = parseString(userXmlString)
+				parseSuccess = True
+			except xml.parsers.expat.ExpatError:
+				print 'error parsing userXmlString'
+				parseSuccess = False
+				print userXmlString
+			if parseSuccess == True:
+				global loggedInUserID
+				userNode = userXml.getElementsByTagName('user')
+			
+				try:
+					loggedInUserID = int(userNode[0].getElementsByTagName('id')[0].firstChild.data)
+					print 'logged in user: %d' % loggedInUserID	
+				except IndexError:
+					print 'unable to read userID from response'
+					loggedInUserID = 0	
 	
 	def showSearchDialog(self):
+		self.tabWidget.setCurrentWidget(self.searchResultsTab)
+		self.bttnFriends.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnPlaces.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		self.bttnSearch.setStyleSheet(QPUSHBUTTON_HIGHLIGHT)
 		self.searchDlg = SearchDialog()
 		self.searchDlg.show()
 	
 	# @QtCore.pyqtSlot()
 	def onSignInDialogClosed(self):
 		if  (hasToken == 1):
-			self.bttnSignIn.setText('Sign Out')
+			self.bttnSignIn.setText('')
 			self.bttnSearch.show()
 			self.bttnRefresh.show()
 			self.bttnLocation.show()
+			self.bttnFriends.show()
+			self.bttnPlaces.show()
+			self.doShowFriendsTab()
 			self.doGetUserDetailForLoggedInUser()
 
 			# set a 'loading...' item
 			checkinItem = QtGui.QListWidgetItem('',self.friendsListWidget)
-			checkinItem.setSizeHint(QtCore.QSize(690, 75))
+			checkinItem.setSizeHint(QtCore.QSize(770, 75))
 			wItem = FriendListItem()
 			wItem.setText('Retrieving recent checkins...','','',APP_DIRECTORY + 'refreshing.gif')
 			self.friendsListWidget.setItemWidget(checkinItem,wItem)
@@ -2049,15 +2697,18 @@ class MainWindow(QtGui.QMainWindow):
 			self.doLoadFriendsCheckings()
 			self.getNearby()
 		else:
-			self.bttnSignIn.setText('Sign In')
+			self.bttnSignIn.setText('')
 			self.bttnSearch.hide()
 			self.bttnRefresh.hide()
 			self.bttnLocation.hide()
+			self.bttnFriends.hide()
+			self.bttnPlaces.hide()
 
 	def onSignOutDialogClosed(self):
 		print 'onSignOutDialogClosed'
 		global doingSignout
 		if doingSignout:
+			doingSignout = False
 			print 'doSignOut'	
 			global fsRequestToken
 			global fsRequestTokenString
@@ -2071,10 +2722,11 @@ class MainWindow(QtGui.QMainWindow):
 			hasToken = 0
 			# delete tokenFile
 			os.remove(userPreferencesDir + 'tokenFile')
-			self.bttnSignIn.setText('Sign In')
+			self.bttnSignIn.setText('')
 			self.bttnSearch.hide()
 			self.bttnRefresh.hide()
 			self.bttnLocation.hide()
+			self.bttnFriends.hide()
 			# reset the friends list widgets
 			self.friendsListWidget.clear()
 
@@ -2110,90 +2762,7 @@ class MainWindow(QtGui.QMainWindow):
 		
 	def loadFriendsCheckingsResultsFromFile(self):
 		print 'loadFriendsCheckingsResults'
-
-		checkinsXmlFile = open(userPreferencesDir + 'checkinsResultsCache.xml','r')
-		checkinXmlString = ''
-		for line in checkinsXmlFile:
-			checkinXmlString += line
-		checkinsXmlFile.close()
-		print checkinXmlString
-		parseSuccess = False
-		try:
-			checkinsXml = parseString(checkinXmlString)
-			parseSuccess = True
-		except xml.parsers.expat.ExpatError:
-			parseSuccess = False
-
-		if parseSuccess == True:
-
-			# remove items from list
-			self.friendsListWidget.clear()
-
-			# switch the current tab to search tab
-			# self.tabWidget.setCurrentWidget(self.searchResultsTab)
-
-			# loop over xml venues and add to list widget
-			checkinNodes = checkinsXml.getElementsByTagName('checkin')
-			for node in checkinNodes:
-				# get photo
-				photoURL = node.getElementsByTagName('photo')[0].firstChild.data
-
-				venueNode = node.getElementsByTagName('venue')
-				OffGrid = False
-				if venueNode.length == 0:
-					print 'no venue info - off the grid'
-					OffGrid = True
-				photoURLchunks = photoURL.split('/')
-				photoFile = userPreferencesDir + 'imageCache' + os.sep + 'users' + os.sep + photoURLchunks[3] + '_' + photoURLchunks[4]
-				print 'photoFile: ' + photoFile			
-				# if cached file doesn't exist for user, download it now
-				if not os.path.exists(photoFile):
-					self.getUserPhoto(photoURL)
-
-				# print node.getElementsByTagName('id')[0].firstChild.data
-				checkinString = node.getElementsByTagName('display')[0].firstChild.data + '\n'
-				if (node.getElementsByTagName('shout').length > 0):
-					checkinString += node.getElementsByTagName('shout')[0].firstChild.data
-				checkinString += node.getElementsByTagName('created')[0].firstChild.data
-				checkinItem = QtGui.QListWidgetItem('',self.friendsListWidget)
-				checkinItem.setSizeHint(QtCore.QSize(690, 75))
-				wItem = FriendListItem()
-				addressString = ''
-				addressNode = node.getElementsByTagName('address')
-				if addressNode.length > 0:
-					if addressNode[0].firstChild != None:
-						addressString += addressNode[0].firstChild.data
-				crosssStreetNode = node.getElementsByTagName('crossstreet')
-				if crosssStreetNode.length > 0:
-					if crosssStreetNode[0].firstChild != None:
-						addressString += ' (' + crosssStreetNode[0].firstChild.data + ')'
-				dateStr = self.calcDateString(node.getElementsByTagName('created')[0].firstChild.data)
-				addressString += ' ~' + dateStr
-				displayStr = node.getElementsByTagName('display')[0].firstChild.data
-				shoutNodes = node.getElementsByTagName('shout')
-				print 'shouts: %d' % shoutNodes.length
-				if shoutNodes.length > 0:
-					displayStr += ' ("' + shoutNodes[0].firstChild.data + '")'
-
-				wItem.setText(displayStr,addressString,'dateStr',photoFile)
-				self.friendsListWidget.setItemWidget(checkinItem,wItem)
-				if OffGrid:
-					checkinItem.setStatusTip('-1')
-				else:
-					checkinItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
-
-			checkinItem = QtGui.QListWidgetItem('',self.friendsListWidget)
-			checkinItem.setSizeHint(QtCore.QSize(690, 75))
-			wItem = FriendListItem()
-			wItem.setText('','','',None)
-			self.friendsListWidget.setItemWidget(checkinItem,wItem)
-			checkinItem.setStatusTip('0')
-		else:
-			# parse error show error window
-			print 'parseSuccess is false'
-
-		if self.processDlg != None:
-			self.processDlg.close()
+		self.loadFriendsCheckinsWorker.start()
 
 	def doLoadFriendsCheckings(self):
 		self.refreshFriendsWorker.start()
@@ -2224,7 +2793,7 @@ class MainWindow(QtGui.QMainWindow):
 		searchNodes = searchXml.getElementsByTagName('venue')
 		for node in searchNodes:
 			nearbyItem = QtGui.QListWidgetItem('',self.searchListWidget)	
-			nearbyItem.setSizeHint(QtCore.QSize(690, 75))
+			nearbyItem.setSizeHint(QtCore.QSize(770, 75))
 			wItem = VenueListItem()
 			addressString = node.getElementsByTagName('address')[0].firstChild.data
 			if node.getElementsByTagName('crossstreet').length > 0:
@@ -2254,45 +2823,7 @@ class MainWindow(QtGui.QMainWindow):
 		return returnString
 	
 	def loadNearby(self):
-		print 'loadNearby'
-		nearbyXmlFile = open(userPreferencesDir + 'nearbyCache.xml','r')
-		nearbyXmlString = ''
-		for line in nearbyXmlFile:
-			nearbyXmlString += line
-		nearbyXmlFile.close()
-		# print nearbyXmlString
-		nearbyXml = parseString(nearbyXmlString)
-
-		# remove items from list
-		self.placesListWidget.clear()
-
-		# loop over xml venues and add to list widget
-		nearbyNodes = nearbyXml.getElementsByTagName('venue')
-		for node in nearbyNodes:
-			# print node.getElementsByTagName('id')[0].firstChild.data
-			nearbyItem = QtGui.QListWidgetItem('',self.placesListWidget)	
-			nearbyItem.setSizeHint(QtCore.QSize(690, 75))
-			wItem = VenueListItem()
-			addressNode = node.getElementsByTagName('address')
-			if addressNode.length > 0:
-				if addressNode[0].firstChild != None:
-					addressString = addressNode[0].firstChild.data
-			if node.getElementsByTagName('crossstreet').length > 0:
-				addressString += ' (' + node.getElementsByTagName('crossstreet')[0].firstChild.data + ')'
-			addressString += ' ~' + self.calcMetersAsString(node.getElementsByTagName('distance')[0].firstChild.data)
-			wItem.setText(node.getElementsByTagName('name')[0].firstChild.data,addressString)
-			self.placesListWidget.setItemWidget(nearbyItem,wItem)
-			nearbyItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
-
-
-			# nearbyPlaceString = node.getElementsByTagName('name')[0].firstChild.data
-			# nearbyPlaceString += ' (' + self.calcMetersAsString(node.getElementsByTagName('distance')[0].firstChild.data) + ')'
-			# nearbyItem = QtGui.QListWidgetItem(nearbyPlaceString,self.placesListWidget)
-			# nearbyItem.setFont(QtGui.QFont('Helvetica', 30))
-			# nearbyItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
-		
-		if self.processDlg != None:
-			self.processDlg.close()	
+		self.loadNearbyVenuesWorker.start()
 		
 	def getNearby(self):
 		print 'getNearby'
@@ -2301,22 +2832,23 @@ class MainWindow(QtGui.QMainWindow):
 	def doFriendItemClicked(self,item):
 		print 'doFriendItemClicked'
 		if str(item.statusTip()) != '-1':
-			self.friendCheckingDlg = FriendCheckinDetailDialog(str(item.statusTip()))
+			self.friendCheckingDlg = FriendCheckinDetailDialog(str(item.statusTip()),self)
 			self.friendCheckingDlg.show()
 	
 	def doNearbyItemClicked(self,item):
 		print 'Item Clicked: ' + item.statusTip()
-		self.loadingWorker = PlaceInfoLoaderWorkerThread()
-		self.placeInfoDlg = PlaceInfoDialog(item.statusTip(),self)
+		if str(item.statusTip()) != '-1':
+			self.loadingWorker = PlaceInfoLoaderWorkerThread()
+			self.placeInfoDlg = PlaceInfoDialog(item.statusTip(),self,self)
 
-		self.loadingWorker.setup(item.statusTip(), self.placeInfoDlg, False)
-		self.connect(self.loadingWorker, QtCore.SIGNAL('finished()'), self.nearbyItemLoadingFinished)
+			self.loadingWorker.setup(item.statusTip(), self.placeInfoDlg, False)
+			self.connect(self.loadingWorker, QtCore.SIGNAL('finished()'), self.nearbyItemLoadingFinished)
 
-		self.loadingWorker.start()
+			self.loadingWorker.start()
 
-		# show processing dialog
-		self.processDlg = ProcessingDialog('Loading...','Please wait while we load the selected item. We may contact the server to refresh with the latest information')
-		self.processDlg.show()
+			# show processing dialog
+			self.processDlg = ProcessingDialog('Loading...','Please wait while we load the selected item. We may contact the server to refresh with the latest information')
+			self.processDlg.show()
 
 	def nearbyItemLoadingFinished(self):
 		print 'nearbyItemLoadingFinished - executing on main gui thread'
@@ -2346,10 +2878,118 @@ class LocationManagerThread(QtCore.QThread):
 		self.exiting = False
 
 	def run(self):
+		print 'LocationManagerThread.start()'
+		global locationSubprocessIsRestarting
+		global locationSubprocessRestartCount
+		locationSubprocessRestartCount = locationSubprocessRestartCount + 1
+		locationSubprocessIsRestarting = False		
+
+		if locationSubprocessRestartCount > 1:
+			time.sleep(15)
+
 		child = subprocess.Popen(['python',GET_LOCATION_SCRIPT], shell=False, stdout=None)
+		global getLocationChildPID
+		getLocationChildPID = child.pid
 		child.wait()
-		# load result
-		time.sleep(2)
+		print 'child process finished'
+
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+
+class LocationBackgroundUpdateThread(QtCore.QThread):
+	def __init__(self, parent = None):
+    		QtCore.QThread.__init__(self, parent)
+		self.exiting = False
+
+	def run(self):		
+		lastLocationReadTime = time.time()
+		lastSuccessfulReadTime = time.time()
+		global getLocationChildExecutionCount
+		global locationMethodType
+		global infoNoticeString
+		global currentLatitude
+		global currentLongitude
+		global horizontalAccuracy
+		global verticalAccuracy
+		global acquisitionCount
+		global locationSubprocessIsRestarting
+
+		while not self.exiting:
+			if (os.path.exists(userPreferencesDir + 'CurrentLocation.txt')):
+				# this delta will keep increasing every loop iteration until it is reset by a successful read	
+				# if the delta gets too big, switch the location type to coarse
+				# kill and restart the child process
+				currentReadSuccessDelta = time.time() - lastSuccessfulReadTime
+				# print 'currentReadSuccessDelta: %d' % currentReadSuccessDelta
+		
+				locationModificationTime = os.path.getmtime(userPreferencesDir + 'CurrentLocation.txt')		
+				# print 'locationModificationTime = %d' % locationModificationTime
+				# print 'lastLocationReadTime = %d' % lastLocationReadTime
+				# print 'lastSuccessfulReadTime = %d' % lastSuccessfulReadTime
+				if lastLocationReadTime != locationModificationTime:
+					lastLocationReadTime = locationModificationTime
+					# time difference, so load file
+					try:
+						strCurrentLatitude = '0.0'
+						strCurrentLongitude = '0.0'
+						strCurrentHAccuracy = '1000000'
+						strCurrentVAccuracy = '1000000'
+						locationFile = open(userPreferencesDir + 'CurrentLocation.txt','r')
+						i = 0
+						for line in locationFile:
+							# print 'line: ' + line
+							i = i + 1
+							if (i == 1):
+								strCurrentLatitude = '%s' % line
+							if (i == 2):
+								strCurrentLongitude = '%s' % line
+							if (i == 3):
+								strCurrentHAccuracy = '%s' % line
+							if (i == 4):
+								strCurrentVAccuracy = '%s' % line
+						locationFile.close()
+						# print 'i was %d' % i
+						if strCurrentLatitude != '0.0' and strCurrentLongitude != '0.0':
+							acquisitionCount = acquisitionCount + 1
+							currentLatitude = float(strCurrentLatitude)
+							currentLongitude = float(strCurrentLongitude)
+							print 'retrieved Latitude: %f' % currentLatitude
+							print 'retrieved Longitude: %f' % currentLongitude
+							if strCurrentHAccuracy == '-1':
+								horizontalAccuracy = 1000000.0
+							else:
+								horizontalAccuracy = float(strCurrentHAccuracy)
+							if strCurrentVAccuracy == '-1':
+								verticalAccuracy = 1000000.0
+							else:
+								verticalAccuracy = float(strCurrentVAccuracy)
+							# nfoNoticeString = 'Location updated'
+							# self.emit(QtCore.SIGNAL('displayInfoNotice()'))
+							lastSuccessfulReadTime = time.time()
+					except:
+						print 'error reading file'
+				else:
+					if not locationSubprocessIsRestarting:
+						# if delta is more than a minute and no initial lock, downgrade location method to 0 = User selected to allow coarse accuracy and speedy lock
+						if locationMethodType > 0:
+							if acquisitionCount == 0:
+								if currentReadSuccessDelta > 90:
+									if locationMethodType == 4:
+										infoNoticeString = 'Failed to update location via GPS, switching to coarse accuracy'
+										self.emit(QtCore.SIGNAL('displayInfoNotice()'))
+					
+									locationMethodType = 0
+									lastSuccessfulReadTime = time.time()
+									self.emit(QtCore.SIGNAL('restartSubProcess()'))
+							else:
+								if currentReadSuccessDelta > 180:
+									locationMethodType = 0
+									lastSuccessfulReadTime = time.time()
+									self.emit(QtCore.SIGNAL('restartSubProcess()'))
+					else:
+						lastSuccessfulReadTime = time.time()
+			time.sleep(10)
 
 	def __del__(self):
 		self.exiting = True
@@ -2359,30 +2999,88 @@ class LocationManager(QtCore.QObject):
 	def __init__(self):
 		QtCore.QObject.__init__(self)
 		self.locationWorker = LocationManagerThread()
-		self.connect(self.locationWorker, QtCore.SIGNAL('finished()'), self.loadLocationFromFile)
+		self.locationBackgroundWorker = LocationBackgroundUpdateThread()
+		# self.connect(self.locationWorker, QtCore.SIGNAL('finished()'), self.loadLocationFromFile)
+		self.connect(self.locationBackgroundWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)		
+		self.connect(self.locationBackgroundWorker, QtCore.SIGNAL('restartSubProcess()'), self.restartSubprocess)		
+
+	def saveLocationMethodType(self):
+		global locationMethodType
+		locationMethodFile = open(userPreferencesDir + 'locationMethodType.txt','w')
+		print 'locationMethodType: %d' % locationMethodType
+		locationMethodFile.write(str(locationMethodType) + '\n')
+		locationMethodFile.close()
+
+	def restartSubprocess(self):
+		global getLocationChildPID
+		global locationSubprocessIsRestarting
+		global acquisitionCount
+		acquisitionCount = 0
+		locationSubprocessIsRestarting = True
+		print 'subprocess pid: %d' % getLocationChildPID
+		if getLocationChildPID > 0:
+			os.kill(getLocationChildPID, 9)
+			time.sleep(1)
+		self.saveLocationMethodType()
+		self.locationWorker.start()
+
+	def displayInfoNoticeGlobal(self):
+		global infoNoticeString
+		global qb
+		if qb != None:
+			qb.displayInfoNotice(infoNoticeString)
 
 	def loadLocationFromFile(self):
+		strCurrentLatitude = '0.0'
+		strCurrentLongitude = '0.0'
+		strCurrentHAccuracy = '1000000'
+		strCurrentVAccuracy = '1000000'
 		locationFile = open(userPreferencesDir + 'CurrentLocation.txt','r')
 		i = 0
 		for line in locationFile:
-			print 'line: ' + line
+			# print 'line: ' + line
 			i = i + 1
 			if (i == 1):
 				strCurrentLatitude = '%s' % line
 			if (i == 2):
 				strCurrentLongitude = '%s' % line
+			if (i == 3):
+				strCurrentHAccuracy = '%s' % line
+			if (i == 4):
+				strCurrentVAccuracy = '%s' % line
 		locationFile.close()
 		print 'i was %d' % i
-		global currentLatitude
-		global currentLongitude
-		currentLatitude = float(strCurrentLatitude)
-		currentLongitude = float(strCurrentLongitude)
-		print 'retrieved Latitude: %f' % currentLatitude
-		print 'retrieved Longitude: %f' % currentLongitude
+		if strCurrentLatitude != '0.0' and strCurrentLongitude != '0.0':
+			global currentLatitude
+			global currentLongitude
+			global horizontalAccuracy
+			global verticalAccuracy
+			currentLatitude = float(strCurrentLatitude)
+			currentLongitude = float(strCurrentLongitude)
+			print 'retrieved Latitude: %f' % currentLatitude
+			print 'retrieved Longitude: %f' % currentLongitude
+			if strCurrentHAccuracy == '-1':
+				horizontalAccuracy = 1000000.0
+			else:
+				horizontalAccuracy = float(strCurrentHAccuracy)
+			if strCurrentVAccuracy == '-1':
+				verticalAccuracy = 1000000.0
+			else:
+				verticalAccuracy = float(strCurrentVAccuracy)
+			global qb
+			if qb == None:
+				print 'qb is None'
+			else:
+				qb.locationAcquired()
+							
+		else:
+			# reacquire fix
+			self.acquireLocationFix()
 
 	def acquireLocationFix(self):
 		print 'LocationManager.acquireLocationFix'
 		self.locationWorker.start()
+		self.locationBackgroundWorker.start()
 	
 app = QtGui.QApplication(sys.argv)
 
@@ -2409,9 +3107,6 @@ if (os.path.exists(userPreferencesDir + 'tokenFile')):
 	print fsSecret
 
 # set up a separate thread for location acquisition
-locationFixAcquired = 0
-currentLatitude = 0
-currentLongitude = 0
 locationFixAcquired = 0
 
 locationManagerObj.acquireLocationFix()

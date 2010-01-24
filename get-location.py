@@ -1,3 +1,19 @@
+# This file is part of barrioSquare.
+#
+# barrioSquare is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# barrioSquare is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with barrioSquare. If not, see <http://www.gnu.org/licenses/>.
+# or write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 # 
 # this file should not be called directly.
 # called from barriosq.py
@@ -6,25 +22,29 @@
 import location
 import gobject
 import os
+import time
 
+getLocationChildPID = 0
 currentLatitude = 0
 currentLongitude = 0
 lockCount = 0
 partialLockCount = 0
 locationMethodType = 0
+maxPartialLockCount = 0
+maxLockCount = 0
 
 userPreferencesDir = os.path.expanduser('~') + os.sep + '.barriosquare' + os.sep
 
 locationMethodFile = open(userPreferencesDir + 'locationMethodType.txt','r')
 i = 0
 for line in locationMethodFile:
-	print 'line: ' + line
+	# print 'line: ' + line
 	i = i + 1
 	if (i == 1):
 		locationMethodType = int(line)
 
 locationMethodFile.close()
-print 'loaded locationMethodType: %d' % locationMethodType
+# print 'loaded locationMethodType: %d' % locationMethodType
 
 if (not os.path.exists(userPreferencesDir)):
 	print 'Creating Pref Dir'
@@ -35,35 +55,48 @@ def on_error(control, error, data):
     data.quit()
 
 def on_changed(device, data):
-    if not device:
-        return
-    if device.fix:
-        if device.fix[1] & location.GPS_DEVICE_LATLONG_SET:
-	    global currentLatitude
-	    global currentLongitude
-	    global lockCount
-	    currentLatitude = device.fix[4]
-	    currentLongitude = device.fix[5]
-            print "lat = %f, long = %f" % device.fix[4:6]
-	    if (currentLatitude == 0) or (currentLongitude == 0):
-		print 'Partial lock acquired'
-		global partialLockCount
-		partialLockCount += 1
-	    else:
-		print 'Full lock acquired'
-		lockCount += 1
-		print 'lock count: %d' % lockCount
-		
-		locationFile = open(userPreferencesDir + 'CurrentLocation.txt','w')
-		strCurrentLatitude = "%f" % currentLatitude
-		strCurrentLongitude = "%f" % currentLongitude
+	if not device:
+		return
+	if device.status == location.GPS_DEVICE_STATUS_NO_FIX:
+		return
+	if device.fix:
+		if device.fix[1] & location.GPS_DEVICE_LATLONG_SET:
+			global currentLatitude
+			global currentLongitude
+			global lockCount
+			currentLatitude = device.fix[4]
+			currentLongitude = device.fix[5]
+			horizAcc = str(device.fix[6])
+			vertAcc = str(device.fix[7])
+			# print device.fix[6]
+			# print "lat = %f" % currentLatitude
+			# print "long = %f" % currentLongitude
+			# print "horizAcc = " + horizAcc
+			if horizAcc == 'nan':
+				realHorizAcc = -1
+			else:
+				realHorizAcc = float(horizAcc) / 100
+			if vertAcc == 'nan':
+				realVertAcc = -1
+			else:
+				realVertAcc = float(vertAcc) / 100
 
-		if ((lockCount == 3) and (partialLockCount > 0)) or ((lockCount == 2) and (partialLockCount == 0)):
+			# print 'Full lock acquired'
+			lockCount += 1
+			print 'Fl|' + str(lockCount) + '|' + str(currentLatitude) + '|' + str(currentLongitude) + '|' + str(realHorizAcc) + '|' + str(realVertAcc)
+			# print 'lock count: %d' % lockCount
+
+			strCurrentLatitude = "%f" % currentLatitude
+			strCurrentLongitude = "%f" % currentLongitude
+
+			locationFile = open(userPreferencesDir + 'CurrentLocation.txt','w')
 			locationFile.write(strCurrentLatitude + '\n')
 			locationFile.write(strCurrentLongitude + '\n')
+			locationFile.write(str(realHorizAcc) + '\n')
+			locationFile.write(str(realVertAcc) + '\n')
 			locationFile.close()	
-
-		    	data.stop()
+			time.sleep(2)
+			# data.stop()			
 
 def on_stop(control, data):
     print "quitting"
@@ -78,21 +111,33 @@ loop = gobject.MainLoop()
 control = location.GPSDControl.get_default()
 device = location.GPSDevice()
 
+interval = location.INTERVAL_120S
+print '(get-location.py) LocationMethodType: %d' % locationMethodType
 if locationMethodType == 0:
+	maxPartialLockCount = 4
+	maxLockCount = 1
 	control.set_properties(preferred_method=location.METHOD_USER_SELECTED,
-                      preferred_interval=location.INTERVAL_DEFAULT)
+                      preferred_interval=interval)
 elif locationMethodType == 1:
+	maxPartialLockCount = 4
+	maxLockCount = 1
 	control.set_properties(preferred_method=location.METHOD_CWP,
-                       preferred_interval=location.INTERVAL_DEFAULT)
+                       preferred_interval=interval)
 elif locationMethodType == 2:
+	maxPartialLockCount = 4
+	maxLockCount = 1
 	control.set_properties(preferred_method=location.METHOD_ACWP,
-                       preferred_interval=location.INTERVAL_DEFAULT)
+                       preferred_interval=interval)
 elif locationMethodType == 3:
+	maxPartialLockCount = 6
+	maxLockCount = 1
 	control.set_properties(preferred_method=location.METHOD_GNSS,
-                       preferred_interval=location.INTERVAL_DEFAULT)
+                       preferred_interval=interval)
 elif locationMethodType == 4:
+	maxPartialLockCount = 6
+	maxLockCount = 1
 	control.set_properties(preferred_method=location.METHOD_AGNSS,
-                       preferred_interval=location.INTERVAL_DEFAULT)
+                       preferred_interval=interval)
 
 # control.set_properties(preferred_method=location.METHOD_USER_SELECTED,
 #                       preferred_interval=location.INTERVAL_DEFAULT)

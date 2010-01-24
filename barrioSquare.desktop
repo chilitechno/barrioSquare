@@ -1,13 +1,13 @@
 [Desktop Entry]
 Encoding=UTF-8
-Version=0.1.0
+Version=0.1.20
 Type=Application
-Terminal=false
-Name=barrioSquare
+Name=BarrioSquare
+Comment=Connect to Foursquare
 Exec=/opt/barrioSquare/barriosq
-Icon=barrioSquare                        
-#X-Window-Icon=timerwidget
-X-Window-Icon=barrioSquare64
-X-HildonDesk-ShowInToolbar=true
+Icon=barrioSquare
+X-Window-Icon=FBReader
+X-Window-Icon-Dimmed=FBReader
+#X-Osso-Service=BarrioSquare
 X-Osso-Type=application/x-executable
 

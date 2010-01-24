@@ -31,7 +31,7 @@ import httplib
 import time
 import oauth
 
-USER_AGENT = 'barrioSquare/0.1.1 (Maemo5; Linux arm7vl) (http://chilitechno.com/fster/)'
+USER_AGENT = 'barrioSquare/0.1.10 (Maemo5; Linux arm7vl) (http://chilitechno.com/fster/)'
 
 # example client using httplib with headers
 class SimpleOAuthClient(oauth.OAuthClient):
