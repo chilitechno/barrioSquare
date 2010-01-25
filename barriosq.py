@@ -2,7 +2,7 @@
 #
 # barriosq.py - main barrioSquare program file
 # 
-# barrioSquare v0.1.5
+# barrioSquare v0.1.20
 # Copyright(c) 2010 Chili Technologies LLC
 # http://www.chilitechno.com/fster
 #
@@ -32,14 +32,14 @@
 # ============================================================================
 # Name        : barriosq.py
 # Author      : Chris J. Burris - chris@chilitechno.com
-# Version     : 0.1.5
+# Version     : 0.1.20
 # Description : barrioSquare
 # ============================================================================
 
 import sys
 import math
 
-from PyQt4 import QtGui, QtCore, QtWebKit
+from PyQt4 import QtGui, QtCore, QtWebKit, QtNetwork
 from barrioConfig import *
 from barrioStyles import *
 import oauthclient
@@ -65,6 +65,8 @@ import webbrowser
 import urllib2
 
 # global script vars
+locationAcceptClientConnections = True
+locationSubprocessClientConnected = False
 locationSubprocessRestartCount = 0
 locationSubprocessIsRestarting = False
 friendRefreshCount = 0
@@ -93,7 +95,7 @@ pingTwitter = False
 allowIncomingPings = True
 pingFacebook = False
 # set FakeCheckin to True to simulate a check-in (must have really checked into a venue at least once before)
-FakeCheckin = True
+FakeCheckin = False
 loggedInUserID = 0
 showSplashScreen = False
 doingSignout = False
@@ -329,7 +331,6 @@ class CheckinWorkerThread(QtCore.QThread):
 			consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
 			signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
 			signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
-
 
 			isPrivate = 1
 			if self.pingFriends == True:
@@ -1020,9 +1021,10 @@ class MyLocationDialog(QtGui.QDialog):
 		self.bttnBadges.setGeometry(610,95,185,80)
 		self.bttnBadges.setStyleSheet(QPUSHBUTTON_DEFAULT)
 
-		self.bttnRefresh = QtGui.QPushButton('Refresh Location',self)
-		self.bttnRefresh.setGeometry(610,185,185,80)
-		self.bttnRefresh.setStyleSheet(QPUSHBUTTON_DEFAULT)
+		# location updated automatically so ignore this
+		# self.bttnRefresh = QtGui.QPushButton('Refresh Location',self)
+		# self.bttnRefresh.setGeometry(610,185,185,80)
+		# self.bttnRefresh.setStyleSheet(QPUSHBUTTON_DEFAULT)
 
 		self.bttnFriends = QtGui.QPushButton('My Friends',self)
 		self.bttnFriends.setGeometry(610,275,185,80)
@@ -1031,8 +1033,8 @@ class MyLocationDialog(QtGui.QDialog):
 		self.connect(self.bttnBadges, QtCore.SIGNAL('clicked()'),
 			self.doBadgesButtonClicked)
 
-		self.connect(self.bttnRefresh, QtCore.SIGNAL('clicked()'),
-			self.doRefreshLocationClicked)
+		# self.connect(self.bttnRefresh, QtCore.SIGNAL('clicked()'),
+		#	self.doRefreshLocationClicked)
 
 	def doRefreshLocationClicked(self):
 		print 'doRefreshLocationClicked'
@@ -1083,24 +1085,109 @@ class WhosHereDialog(QtGui.QDialog):
 				self.whosHereListWidget.setItemWidget(checkinItem,wItem)
 				checkinItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
 
+class AddTipOrToDoInBackgroundThread(QtCore.QThread):
+	def __init__(self, parent = None):
+	    		QtCore.QThread.__init__(self, parent)
+			self.exiting = False
+
+	def setup(self,venueID,addType,tipString):
+		self.venueID = venueID
+		self.tipString = tipString
+		self.addType = addType
+	
+	def run(self):
+		client3 = oauthclient.SimpleOAuthClient('api.foursquare.com', 80, API_PREFIX_URL+'addtip', ACCESS_TOKEN_URL, AUTHORIZATION_URL)
+		consumer = oauth.OAuthConsumer(CONSUMER_KEY, CONSUMER_SECRET)
+		signature_method_plaintext = oauth.OAuthSignatureMethod_PLAINTEXT()
+		signature_method_hmac_sha1 = oauth.OAuthSignatureMethod_HMAC_SHA1()
+
+		nearbyParams = {
+			'vid'	:	self.venueID,
+			'geolat' : 	currentLatitude,
+			'geolong':	currentLongitude,
+			'text':		self.tipString,
+			'type':		self.addType,
+			'oauth_token':	fsKey,
+			'oauth_token_secret':	fsSecret
+		}
+		oauth_request = oauth.OAuthRequest.from_consumer_and_token(consumer, callback=CALLBACK_URL, http_url=API_PREFIX_URL+'addtip', parameters=nearbyParams)
+		oauth_request.sign_request(signature_method_plaintext, consumer, fsRequestToken)
+		# print oauth_request.to_postdata()
+		addtipResultXmlString = client3.access_resource(oauth_request, http_url=API_PREFIX_URL+'addtip', requestType='POST')
+		print addtipResultXmlString		
+		parseSuccess = False
+		created = False
+		try:
+			addtipResultXml = parseString(addtipResultXmlString)
+			parseSuccess = True
+			createdNodes = addtipResultXml.getElementsByTagName('created')
+			if createdNodes.length > 0:
+				created = True
+
+		except xml.parsers.expat.ExpatError:
+			print 'error parsing add tip'
+			parseSuccess = False
+			infoNoticeString = 'Error: api.foursquare.com problem. Check tips before trying again'
+			self.emit(QtCore.SIGNAL('displayInfoNotice()'))	
+
+		if created:
+			self.emit(QtCore.SIGNAL('addTipSuccess()'))	
+		else:	
+			self.emit(QtCore.SIGNAL('addTipFailed()'))	
+
+	def __del__(self):
+		self.exiting = True
+		self.wait()
+
 class AddTipDialog(QtGui.QMainWindow):
 	def __init__(self, venueID, venueName, parent=None):
 		QtGui.QMainWindow.__init__(self, parent)	
-		self.setWindowTitle('Add tip for ' + venueName)
-		self.lblName = QtGui.QLabel('Add Tip',self)
-		self.lblName.setGeometry(5,5,100,10)
+		self.venueID = venueID
+		self.setWindowTitle('Add a tip for ' + venueName)
+		self.lblName = QtGui.QLabel('Add a Tip',self)
+		self.lblName.setGeometry(5,5,100,25)
 		self.txtTip = QtGui.QTextEdit(self)
 		self.txtTip.setAcceptRichText(False)
-		self.txtTip.setGeometry(5,15,800,200)
+		self.txtTip.setGeometry(5,35,790,250)
 
+		self.bttnAddTip = QtGui.QPushButton('Add Tip',self)
+		self.bttnAddTip.setGeometry(640,300,150,80)
+		self.bttnAddTip.setStyleSheet(QPUSHBUTTON_DEFAULT)
+
+		self.connect(self.bttnAddTip, QtCore.SIGNAL('clicked()'),
+			self.doAddTipClicked)
+
+		self.addTipWorker = AddTipOrToDoInBackgroundThread()
+		self.connect(self.addTipWorker, QtCore.SIGNAL('addTipSuccess()'), self.addTipSuccess)
+		self.connect(self.addTipWorker, QtCore.SIGNAL('addTipFailed()'), self.addTipFailed)
+		self.connect(self.addTipWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)
+
+	def doAddTipClicked(self):
+		self.addTipWorker.setup(self.venueID,'tip',str(self.txtTip.toPlainText()))
+		self.addTipWorker.start()
+
+	def addTipSuccess(self):
+		global qb
+		qb.displayInfoNotice('Tip added successfully')	
+		self.close()
+
+	def addTipFailed(self):
+		global qb
+		qb.displayInfoNotice('Failed to add tip')		
+	
+	def displayInfoNoticeGlobal(self):
+		global infoNoticeString
+		global qb
+		qb.displayInfoNotice(infoNoticeString)
 		
 class TipsDialog(QtGui.QMainWindow):
 	def __init__(self, venueID, parent=None):
 		QtGui.QMainWindow.__init__(self, parent)	
 		self.setWindowTitle('Tips')
 		self.resize(800,480)
+		self.venueID = int(venueID)
 		self.tipsListWidget = QtGui.QListWidget(self)
-		self.tipsListWidget.setGeometry(5, 5, 790, 350)
+		self.tipsListWidget.setGeometry(5, 5, 820, 350)
 		p = self.tipsListWidget.palette()
 		p.setColor(QtGui.QPalette.Highlight, QtGui.QColor(255, 255, 184))
 		p.setColor(QtGui.QPalette.Base, QtGui.QColor(255, 0, 0))
@@ -1116,14 +1203,14 @@ class TipsDialog(QtGui.QMainWindow):
 		print nearbyXmlString
 		nearbyXml = parseString(nearbyXmlString)
 		
-		venueName = nearbyXml.getElementsByTagName('name')[0].firstChild.data
+		self.venueName = nearbyXml.getElementsByTagName('name')[0].firstChild.data
 		tipNodes = nearbyXml.getElementsByTagName('tip')
 		if tipNodes.length > 0:
 			tipStr = '%d' % tipNodes.length
 			if tipNodes.length == 1:
-				tipStr += ' tip for ' + venueName
+				tipStr += ' tip for ' + self.venueName
 			else:
-				tipStr += ' tips for ' + venueName
+				tipStr += ' tips for ' + self.venueName
 			for node in tipNodes:
 				tipItem = QtGui.QListWidgetItem('',self.tipsListWidget)
 
@@ -1144,7 +1231,7 @@ class TipsDialog(QtGui.QMainWindow):
 					height = 75
 
 	
-				tipItem.setSizeHint(QtCore.QSize(730, height))
+				tipItem.setSizeHint(QtCore.QSize(770, height))
 				wItem = TipListItem(height)
 
 				photoUrl = node.getElementsByTagName('photo')[0].firstChild.data
@@ -1155,10 +1242,19 @@ class TipsDialog(QtGui.QMainWindow):
 				self.tipsListWidget.setItemWidget(tipItem,wItem)
 				tipItem.setStatusTip(node.getElementsByTagName('id')[0].firstChild.data)
 		else:
-			tipStr = 'No tips for ' + venueName
+			tipStr = 'No tips for ' + self.venueName
 		self.setWindowTitle(tipStr)
-		# parse output
 
+		# add button for adding tip
+		self.bttnAddTip = QtGui.QPushButton('+',self)
+		self.bttnAddTip.setGeometry(740,355,60,60)
+		self.connect(self.bttnAddTip, QtCore.SIGNAL('clicked()'),
+			self.doShowAddTip)
+		
+		# parse output
+	def doShowAddTip(self):
+		addTipDlg = AddTipDialog(self.venueID,self.venueName,self)
+		addTipDlg.show()
 		
 class PlaceInfoDialog(QtGui.QMainWindow):
 	def __init__(self, id, mainWindow, parent=None):
@@ -2448,9 +2544,14 @@ class MainWindow(QtGui.QMainWindow):
 		reply = QtGui.QMessageBox.question(self, 'Quit?',"Are you sure you want to quit barrioSquare?", QtGui.QMessageBox.Yes, QtGui.QMessageBox.No)
 		if reply == QtGui.QMessageBox.Yes:
 			global getLocationChildPID
+			global locationAcceptClientConnections
+			locationAcceptClientConnections = False
 			if getLocationChildPID > 0:
 				# kill subprocess before exit
-				os.kill(getLocationChildPID, 9)
+				try:
+					os.kill(getLocationChildPID, 9)
+				except OSError:
+					print 'error killing child, already terminated?'
 			event.accept()				
 		else:
 			event.ignore()
@@ -2877,19 +2978,21 @@ class LocationManagerThread(QtCore.QThread):
     		QtCore.QThread.__init__(self, parent)
 		self.exiting = False
 
+	def setPort(self,port):
+		self.serverPort = port
+
 	def run(self):
 		print 'LocationManagerThread.start()'
 		global locationSubprocessIsRestarting
 		global locationSubprocessRestartCount
+		global locationMethodType
 		locationSubprocessRestartCount = locationSubprocessRestartCount + 1
 		locationSubprocessIsRestarting = False		
 
-		if locationSubprocessRestartCount > 1:
-			time.sleep(15)
-
-		child = subprocess.Popen(['python',GET_LOCATION_SCRIPT], shell=False, stdout=None)
+		child = subprocess.Popen(['python',GET_LOCATION_SCRIPT,str(locationMethodType),str(self.serverPort)], shell=False, stdout=None)
 		global getLocationChildPID
 		getLocationChildPID = child.pid
+		print 'child process ID: %d' % getLocationChildPID
 		child.wait()
 		print 'child process finished'
 
@@ -2903,94 +3006,61 @@ class LocationBackgroundUpdateThread(QtCore.QThread):
 		self.exiting = False
 
 	def run(self):		
-		lastLocationReadTime = time.time()
-		lastSuccessfulReadTime = time.time()
-		global getLocationChildExecutionCount
-		global locationMethodType
-		global infoNoticeString
 		global currentLatitude
 		global currentLongitude
 		global horizontalAccuracy
 		global verticalAccuracy
 		global acquisitionCount
-		global locationSubprocessIsRestarting
+		global locationSubprocessClientConnected
+		global locationAcceptClientConnections
 
-		while not self.exiting:
-			if (os.path.exists(userPreferencesDir + 'CurrentLocation.txt')):
-				# this delta will keep increasing every loop iteration until it is reset by a successful read	
-				# if the delta gets too big, switch the location type to coarse
-				# kill and restart the child process
-				currentReadSuccessDelta = time.time() - lastSuccessfulReadTime
-				# print 'currentReadSuccessDelta: %d' % currentReadSuccessDelta
-		
-				locationModificationTime = os.path.getmtime(userPreferencesDir + 'CurrentLocation.txt')		
-				# print 'locationModificationTime = %d' % locationModificationTime
-				# print 'lastLocationReadTime = %d' % lastLocationReadTime
-				# print 'lastSuccessfulReadTime = %d' % lastSuccessfulReadTime
-				if lastLocationReadTime != locationModificationTime:
-					lastLocationReadTime = locationModificationTime
-					# time difference, so load file
-					try:
-						strCurrentLatitude = '0.0'
-						strCurrentLongitude = '0.0'
-						strCurrentHAccuracy = '1000000'
-						strCurrentVAccuracy = '1000000'
-						locationFile = open(userPreferencesDir + 'CurrentLocation.txt','r')
-						i = 0
-						for line in locationFile:
-							# print 'line: ' + line
-							i = i + 1
-							if (i == 1):
-								strCurrentLatitude = '%s' % line
-							if (i == 2):
-								strCurrentLongitude = '%s' % line
-							if (i == 3):
-								strCurrentHAccuracy = '%s' % line
-							if (i == 4):
-								strCurrentVAccuracy = '%s' % line
-						locationFile.close()
-						# print 'i was %d' % i
-						if strCurrentLatitude != '0.0' and strCurrentLongitude != '0.0':
-							acquisitionCount = acquisitionCount + 1
-							currentLatitude = float(strCurrentLatitude)
-							currentLongitude = float(strCurrentLongitude)
-							print 'retrieved Latitude: %f' % currentLatitude
-							print 'retrieved Longitude: %f' % currentLongitude
-							if strCurrentHAccuracy == '-1':
-								horizontalAccuracy = 1000000.0
-							else:
-								horizontalAccuracy = float(strCurrentHAccuracy)
-							if strCurrentVAccuracy == '-1':
-								verticalAccuracy = 1000000.0
-							else:
-								verticalAccuracy = float(strCurrentVAccuracy)
-							# nfoNoticeString = 'Location updated'
-							# self.emit(QtCore.SIGNAL('displayInfoNotice()'))
-							lastSuccessfulReadTime = time.time()
-					except:
-						print 'error reading file'
-				else:
-					if not locationSubprocessIsRestarting:
-						# if delta is more than a minute and no initial lock, downgrade location method to 0 = User selected to allow coarse accuracy and speedy lock
-						if locationMethodType > 0:
-							if acquisitionCount == 0:
-								if currentReadSuccessDelta > 90:
-									if locationMethodType == 4:
-										infoNoticeString = 'Failed to update location via GPS, switching to coarse accuracy'
-										self.emit(QtCore.SIGNAL('displayInfoNotice()'))
-					
-									locationMethodType = 0
-									lastSuccessfulReadTime = time.time()
-									self.emit(QtCore.SIGNAL('restartSubProcess()'))
-							else:
-								if currentReadSuccessDelta > 180:
-									locationMethodType = 0
-									lastSuccessfulReadTime = time.time()
-									self.emit(QtCore.SIGNAL('restartSubProcess()'))
-					else:
-						lastSuccessfulReadTime = time.time()
-			time.sleep(10)
+		print 'LocationBackgroundUpdateThread.run()'
+		# create a background TCP server to listen for location updates
+		self.server = QtNetwork.QTcpServer()
+		listening = self.server.listen(QtNetwork.QHostAddress.LocalHost, 0)
+		self.serverPort	= self.server.serverPort()	
+		print 'serverPort is: %d' % self.serverPort
 
+		while listening:
+			while locationAcceptClientConnections:
+				print 'Listening for client connection...'			
+				self.emit(QtCore.SIGNAL('launchChildProcess'),self.serverPort)
+				waitingForConnect = self.server.waitForNewConnection(120000)
+				if waitingForConnect[0]:
+					print 'client connected'
+					locationSubprocessClientConnected = True
+					self.connSock = self.server.nextPendingConnection()
+					print self.connSock.state()
+					while self.connSock.state() == QtNetwork.QAbstractSocket.ConnectedState:
+						waitingForData = self.connSock.waitForReadyRead(3600000)
+						print waitingForData
+						if waitingForData:
+							bytesAvailable = self.connSock.bytesAvailable()
+							print 'bytesAvailable: %d' % bytesAvailable
+							# read bytes
+							line = self.connSock.read(bytesAvailable).replace("\n","").replace("\r","")
+							print line
+							commandPacket = line.split("|")
+							print commandPacket
+							command = commandPacket[0]
+							print command
+							if command == 'UPDATING_LOCATION':
+								print 'updating location'
+								# UPDATE_LOCATION|latitude|longitude|horzaccuracy|vertaccuracy
+								currentLatitude = float(commandPacket[1])
+								currentLongitude = float(commandPacket[2])
+								horizontalAccuracy = float(commandPacket[3])
+								verticalAccuracy = float(commandPacket[4])
+								acquisitionCount = acquisitionCount + 1
+							elif command == 'INITIALIZING':
+								print 'OK, child process connected to socket. received init'
+							elif command == 'QUITTING':
+								print 'child process quitting, restart it'
+								self.connSock.setSocketState(QtNetwork.QAbstractSocket.ClosingState)
+					print 'client disconnected'
+					locationSubprocessClientConnected = False
+			# close the server
+			self.server.close()
 	def __del__(self):
 		self.exiting = True
 		self.wait()
@@ -3002,7 +3072,13 @@ class LocationManager(QtCore.QObject):
 		self.locationBackgroundWorker = LocationBackgroundUpdateThread()
 		# self.connect(self.locationWorker, QtCore.SIGNAL('finished()'), self.loadLocationFromFile)
 		self.connect(self.locationBackgroundWorker, QtCore.SIGNAL('displayInfoNotice()'), self.displayInfoNoticeGlobal)		
-		self.connect(self.locationBackgroundWorker, QtCore.SIGNAL('restartSubProcess()'), self.restartSubprocess)		
+		self.connect(self.locationBackgroundWorker, QtCore.SIGNAL('restartSubProcess()'), self.restartSubprocess)
+		self.connect(self.locationBackgroundWorker, QtCore.SIGNAL('launchChildProcess'), self.launchChildProcess)				
+
+	def launchChildProcess(self,port):
+		if not locationSubprocessClientConnected:
+			self.locationWorker.setPort(port)
+			self.locationWorker.start()
 
 	def saveLocationMethodType(self):
 		global locationMethodType
@@ -3012,17 +3088,15 @@ class LocationManager(QtCore.QObject):
 		locationMethodFile.close()
 
 	def restartSubprocess(self):
+		self.saveLocationMethodType()
 		global getLocationChildPID
 		global locationSubprocessIsRestarting
 		global acquisitionCount
 		acquisitionCount = 0
-		locationSubprocessIsRestarting = True
 		print 'subprocess pid: %d' % getLocationChildPID
 		if getLocationChildPID > 0:
 			os.kill(getLocationChildPID, 9)
-			time.sleep(1)
-		self.saveLocationMethodType()
-		self.locationWorker.start()
+			time.sleep(2)
 
 	def displayInfoNoticeGlobal(self):
 		global infoNoticeString
@@ -3079,7 +3153,7 @@ class LocationManager(QtCore.QObject):
 
 	def acquireLocationFix(self):
 		print 'LocationManager.acquireLocationFix'
-		self.locationWorker.start()
+		# self.locationWorker.start()
 		self.locationBackgroundWorker.start()
 	
 app = QtGui.QApplication(sys.argv)

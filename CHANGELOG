@@ -1,5 +1,12 @@
 CHANGE LOG
 
+v0.1.20:
+	Changed the way the location subsytem works - Intialize a tcp socket server and have child process 
+	communicate updates to main app. Location will only be updated every 120 seconds.
+	Removed button for "Refresh location. Rudimentary support for adding tips to venues.
+	Log errors to ~/.barriosquare/stderr.log
+	Auto refresh of user friends' checkins on load.
+
 v0.1.10:
 	Major flow control updates, and UI tweaks to improve loading times.
 	Added QThreads for signIn dialog to enable background signin thread and osso display.

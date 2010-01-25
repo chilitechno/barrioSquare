@@ -1,4 +1,6 @@
 # This file is part of barrioSquare.
+# 
+# v0.1.20
 #
 # barrioSquare is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -23,28 +25,30 @@ import location
 import gobject
 import os
 import time
+import sys
+import socket
+
+print sys.argv
 
 getLocationChildPID = 0
 currentLatitude = 0
 currentLongitude = 0
 lockCount = 0
 partialLockCount = 0
-locationMethodType = 0
+locationMethodType = int(sys.argv[1])
+serverPort = int(sys.argv[2])
+
 maxPartialLockCount = 0
 maxLockCount = 0
 
 userPreferencesDir = os.path.expanduser('~') + os.sep + '.barriosquare' + os.sep
 
-locationMethodFile = open(userPreferencesDir + 'locationMethodType.txt','r')
-i = 0
-for line in locationMethodFile:
-	# print 'line: ' + line
-	i = i + 1
-	if (i == 1):
-		locationMethodType = int(line)
-
-locationMethodFile.close()
 # print 'loaded locationMethodType: %d' % locationMethodType
+
+# create the socket to back to the server
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect(('127.0.0.1', serverPort))
+sock.send('INITIALIZING\n\r')
 
 if (not os.path.exists(userPreferencesDir)):
 	print 'Creating Pref Dir'
@@ -61,6 +65,7 @@ def on_changed(device, data):
 		return
 	if device.fix:
 		if device.fix[1] & location.GPS_DEVICE_LATLONG_SET:
+			global sock
 			global currentLatitude
 			global currentLongitude
 			global lockCount
@@ -88,18 +93,24 @@ def on_changed(device, data):
 
 			strCurrentLatitude = "%f" % currentLatitude
 			strCurrentLongitude = "%f" % currentLongitude
-
-			locationFile = open(userPreferencesDir + 'CurrentLocation.txt','w')
-			locationFile.write(strCurrentLatitude + '\n')
-			locationFile.write(strCurrentLongitude + '\n')
-			locationFile.write(str(realHorizAcc) + '\n')
-			locationFile.write(str(realVertAcc) + '\n')
-			locationFile.close()	
-			time.sleep(2)
+			
+			sockCommand = 'UPDATING_LOCATION|' + str(currentLatitude) + '|' + str(currentLongitude) + '|' + str(realHorizAcc) + '|' + str(realVertAcc)
+			sock.send(sockCommand + '\n\r')
+			
+			#
+			# locationFile = open(userPreferencesDir + 'CurrentLocation.txt','w')
+			# locationFile.write(strCurrentLatitude + '\n')
+			# locationFile.write(strCurrentLongitude + '\n')
+			# locationFile.write(str(realHorizAcc) + '\n')
+			# locationFile.write(str(realVertAcc) + '\n')
+			# locationFile.close()	
+			# time.sleep(2)
 			# data.stop()			
 
 def on_stop(control, data):
     print "quitting"
+    global sock
+    sock.close()
     data.quit()
 
 def start_location(data):
